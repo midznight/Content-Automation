@@ -1,135 +1,111 @@
-# Deploy Automation-Content Hub ke VPS
+# Jalankan Automation-Content Hub dengan biaya Rp0
 
-Dokumen ini menyiapkan **M1 Hub inti** sebagai layanan uji integrasi Muse/Cue. Ini bukan pernyataan bahwa seluruh pipeline produksi sudah selesai. Fitur M3 (artefak dan penyimpanan S3-compatible, Telegram approvals, failover pipeline), M4 bake-off, M5 dashboard baca, backup off-site terjadwal, dan uji integrasi nyata masih merupakan gerbang sebelum operasional harian.
+Dokumen ini memilih jalur paling sederhana untuk pemula yang belum memiliki modal: **jalankan Hub pada PC Windows yang sudah dimiliki**, lalu buat URL publik sementara dengan Cloudflare Quick Tunnel. Tidak ada VPS, domain berbayar, kartu pembayaran, atau Docker Desktop yang wajib dibeli.
 
-## 1. Infrastruktur yang dibutuhkan
+## Yang gratis dan batasannya
 
-Gunakan VPS Linux Ubuntu LTS dengan Docker Engine + Docker Compose Plugin, alamat IPv4 publik, dan domain/subdomain yang memang disediakan khusus untuk Automation-Content.
+| Komponen | Cara pakai | Biaya |
+|---|---|---:|
+| GitHub repository | Source code dan riwayat perubahan | Rp0 |
+| GitHub Actions | Tes dan build pada repository publik | Rp0 untuk standard hosted runners public repo |
+| Python 3.12 | Menjalankan Hub di PC | Rp0 |
+| Cloudflare Quick Tunnel | HTTPS sementara dari internet ke PC lokal | Rp0 |
+| SQLite | Database tersimpan di disk PC sendiri | Rp0 |
+| Domain/VPS | Tidak digunakan pada jalur ini | Rp0 |
 
-Rekomendasi awal: **2 vCPU / 4 GiB RAM / 80 GiB SSD di Singapore**. Sebagai patokan harga, DigitalOcean Basic Droplet dengan ukuran 4 GiB / 2 vCPU / 80 GiB tercantum **US$24/bulan**; datacenter Singapore tersedia sebagai region `SGP1`. Harga tidak termasuk domain, backup tambahan, atau storage artefak. Pakai VPS yang sudah dimiliki bila kapasitas dan kontrolnya memadai.
+**Kompromi penting:** ini adalah hosting dari PC sendiri, bukan server cloud 24/7. PC, listrik, dan koneksi internet harus aktif saat agen Muse/Cue membutuhkan Hub. Ketika PC mati, tidur, atau internet terputus, Hub tidak bisa dijangkau.
 
-- Harga: https://www.digitalocean.com/pricing/droplets
-- Region: https://docs.digitalocean.com/platform/regional-availability/
-- Docker Engine: https://docs.docker.com/engine/install/ubuntu/
-- Docker Compose: https://docs.docker.com/compose/install/linux/
+Quick Tunnel membuat URL acak *.trycloudflare.com; URL berganti setiap kali tunnel dibuat ulang, tidak memiliki uptime guarantee, dan tidak mendukung SSE. Karena itu Hub dikonfigurasi untuk mengirim respons MCP JSON pada pemanggilan tool. Kecocokan konfigurasi JSON ini tetap harus dibuktikan dengan uji koneksi Muse dan Cue yang benar-benar dipakai.
 
-## 2. DNS dan firewall
+## 1. Persiapan satu kali di Windows
 
-Buat DNS `A` record untuk hostname khusus Automation-Content yang mengarah ke IPv4 VPS. Contoh dokumentasi: `content-hub.example.com`; ganti dengan domain Anda sendiri. Jangan menggunakan hostname atau database Automation-Business.
+Pasang:
+1. **Python 3.12**: https://www.python.org/downloads/windows/ (aktifkan Python Launcher saat instalasi).
+2. **Git for Windows**: https://git-scm.com/download/win
+3. **cloudflared**: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
 
-Buka hanya port:
-- TCP 22 untuk SSH (batasi alamat sumber bila memungkinkan).
-- TCP 80 dan 443 untuk Caddy/HTTPS.
-- Jangan membuka port 8000 ke internet. MCP hanya diekspos melalui Caddy.
+Tidak perlu membuat akun Oracle, Render, Railway, VPS, atau membeli domain untuk jalur ini.
 
-Caddy meminta dan memperbarui sertifikat HTTPS otomatis. Bila memakai Cloudflare DNS proxy, selesaikan validasi/konfigurasi TLS sesuai mode proxy; konfigurasi paling sederhana untuk bootstrap adalah DNS-only sampai sertifikat Caddy aktif.
+## 2. Ambil source proyek
 
-## 3. Siapkan direktori di VPS
+Buka PowerShell:
 
-Buat akun deploy tersendiri (jangan gunakan login root untuk workflow). Instal Docker Engine dan Compose Plugin sesuai dokumentasi resmi. Akun deploy perlu menjalankan Docker; keanggotaan grup `docker` setara dengan hak root pada host, jadi batasi siapa yang dapat memakai akun dan kuncinya.
+    git clone https://github.com/midznight/Content-Automation.git
+    cd Content-Automation\sistem-agen
 
-Clone repository publik ini ke path tetap, misalnya:
+Untuk update berikutnya:
 
-```bash
-sudo mkdir -p /opt/automation-content
-sudo chown "$USER":"$USER" /opt/automation-content
-git clone --branch main https://github.com/midznight/Content-Automation.git /opt/automation-content
-cd /opt/automation-content/sistem-agen
-```
+    cd ..\..
+    git pull --ff-only origin main
+    cd sistem-agen
 
-Siapkan konfigurasi runtime dan volume database:
+## 3. Jalankan Hub + tunnel
 
-```bash
-cp .env.example .env
-nano .env
-mkdir -p data
-sudo chown -R 10001:10001 data
-chmod 700 data
-```
+Dari folder sistem-agen:
 
-Isi `.env` dengan hostname sebenarnya:
+    Set-ExecutionPolicy -Scope Process Bypass
+    .\Start-ContentHub.ps1
 
-```dotenv
-DOMAIN=content-domain-anda.example
-MCP_ALLOWED_HOSTS=content-domain-anda.example,content-domain-anda.example:*
-MCP_ALLOWED_ORIGINS=
-ACME_EMAIL=email-anda@example.com
-```
+Script akan:
+- Membuat virtual environment Python lokal.
+- Memasang dependensi proyek.
+- Membuat folder data dan database data\hub.db (data tetap tersimpan di PC).
+- Menjalankan migrasi Alembic.
+- Membuat Cloudflare Quick Tunnel.
+- Membatasi Host header hanya ke URL tunnel yang dibuat dan localhost.
+- Menjalankan FastAPI + MCP pada 127.0.0.1.
 
-Jangan commit `.env`. Jangan memasukkan API key agen, private key SSH, token Telegram, atau kredensial storage ke GitHub source.
+Setelah siap, PowerShell menampilkan URL, misalnya:
 
-## 4. Deploy pertama kali secara manual
+    https://nama-acak.trycloudflare.com/mcp
 
-Dari `/opt/automation-content/sistem-agen`:
+Gunakan URL yang benar-benar ditampilkan oleh script, bukan contoh di atas. Biarkan jendela PowerShell tetap terbuka selama Hub digunakan. Tekan Ctrl+C untuk menghentikan server dan tunnel.
 
-```bash
-docker compose config
-docker compose up -d --build
-docker compose ps
-docker compose logs --tail=100 hub caddy
-```
+## 4. Buat identitas agen dan simpan kunci
 
-Saat container mulai, Alembic menjalankan migrasi `upgrade head` terhadap `DATABASE_URL=sqlite:////data/hub.db`. Database runtime berada di direktori persisten `sistem-agen/data/`, bukan file `hub.db` yang ikut terunggah ke source repository. Endpoint kesehatan:
+Buka PowerShell kedua, masuk ke folder yang sama, lalu buat kunci CEO:
 
-- `https://DOMAIN-ANDA/health`
-- MCP Streamable HTTP: `https://DOMAIN-ANDA/mcp`
+    .\.venv\Scripts\python.exe -m hub.admin create-agent cue_ceo ceo --vendor cue
 
-Health endpoint publik hanya untuk pemeriksaan status. Tool MCP memerlukan API key agen pada header `Authorization: Bearer ...` atau `X-API-Key`.
+Buat pula identitas untuk setiap agen Muse/Cue yang akan diuji menggunakan role yang sesuai. Simpan masing-masing kunci langsung ke secure credential store platform agen. Jangan kirim kunci melalui chat, issue GitHub, atau file repository.
 
-Buat agen melalui CLI di dalam container. Contoh CEO Cue:
+Daftar agen tanpa menampilkan kunci:
 
-```bash
-docker compose exec hub python -m hub.admin create-agent cue_ceo ceo --vendor cue
-```
+    .\.venv\Scripts\python.exe -m hub.admin list-agents
 
-Kunci mentah hanya ditampilkan satu kali. Masukkan langsung ke secure credential store platform agen; jangan kirim ke chat, issue, log, atau file repository. Daftar agen tanpa kunci:
+Endpoint konektor ialah URL tunnel yang ditampilkan + /mcp. Setiap agen memakai API key masing-masing melalui Authorization: Bearer <kunci> atau X-API-Key.
 
-```bash
-docker compose exec hub python -m hub.admin list-agents
-```
+## 5. URL, keamanan, dan batas operasional
 
-## 5. Aktifkan automatic deployment dari GitHub
+- Quick Tunnel bersifat publik. Siapa pun yang mengetahui URL bisa mencapai endpoint, tetapi tool tetap memerlukan API key agen yang valid.
+- Gunakan kunci berbeda untuk tiap agen. Cabut dan rotasi kunci jika bocor.
+- Jangan menaruh database atau file .env ke GitHub. Database lokal berada di data\hub.db.
+- Jangan biarkan Windows sleep saat Hub harus melayani agen.
+- URL acak berubah saat tunnel dihentikan atau dijalankan ulang; perbarui URL pada semua konektor Muse/Cue sesudahnya.
+- Quick Tunnel ditujukan untuk development/testing dan tidak memberi jaminan uptime.
+- Belum ada backup cloud otomatis pada jalur ini. Salin data\hub.db ke media lain secara berkala ketika Hub sudah dihentikan dengan benar.
+- Sebelum operasi konten nyata, selesaikan T1/T2/T3 yang relevan dan milestone pipeline berikutnya. M1 yang hidup tidak berarti M3-M6 sudah selesai.
 
-Workflow `.github/workflows/content-hub.yml` menjalankan:
-1. Install package Python 3.12 dan dependensi dev.
-2. `pytest -q`.
-3. `ruff check .` dan `ruff format --check .`.
-4. Validasi konfigurasi Docker Compose dan build image.
-5. Untuk push ke `main` setelah semua tes lulus, SSH ke VPS lalu `git pull --ff-only` dan rebuild/restart Compose.
+## 6. Tes koneksi pertama (wajib sebelum mengandalkan agen)
 
-Di GitHub, buat **Settings → Environments → New environment** dengan nama tepat `production`; batasi deployment branch ke `main`. Simpan secrets berikut di environment `production`:
+1. Pastikan https://<URL-TUNNEL>/health menunjukkan database sehat.
+2. Sambungkan satu agen CEO dan satu agen Muse menggunakan URL /mcp serta API key masing-masing.
+3. Jalankan ping-pong T1: CEO kirim task echo, Muse mengambil, membalas, lalu CEO membaca hasilnya.
+4. Uji respons JSON melalui konektor aktual. Quick Tunnel tidak membawa SSE; bila connector Cue/Muse mewajibkan SSE dan gagal dalam negosiasi, jangan lanjutkan produksi. Catat bukti kegagalan dan evaluasi tunnel berkemampuan SSE.
+5. Pastikan pemanggilan tanpa key / dengan key salah ditolak.
 
-| Secret | Isi |
-|---|---|
-| `VPS_HOST` | IPv4 atau hostname VPS |
-| `VPS_SSH_PORT` | Port SSH (biasanya `22`) |
-| `VPS_SSH_USER` | Akun deploy khusus |
-| `VPS_SSH_PRIVATE_KEY` | Private key khusus untuk GitHub Actions |
-| `VPS_KNOWN_HOSTS` | Baris host key SSH yang telah diverifikasi |
-| `VPS_DEPLOY_PATH` | Path absolut repo, misalnya `/opt/automation-content` |
+## 7. Tentang CI otomatis GitHub
 
-Tambahkan public key pasangannya ke `~/.ssh/authorized_keys` milik akun deploy. Isi `VPS_KNOWN_HOSTS` dari host key VPS yang fingerprint-nya telah diverifikasi melalui console provider; jangan mempercayai hasil `ssh-keyscan` tanpa verifikasi. Workflow menggunakan StrictHostKeyChecking dan tidak menonaktifkan pemeriksaan host.
+Workflow .github/workflows/content-hub.yml hanya menjalankan validasi gratis pada perubahan source: pytest, Ruff, konfigurasi Compose, Docker image build, dan smoke test container + migrasi database. Karena repo ini publik, standard GitHub-hosted Actions runners gratis.
 
-Job deploy memakai GitHub Environment `production`, sehingga secrets hanya tersedia di job deployment. Setelah semua secret ada, push ke `main` akan deploy otomatis **hanya sesudah tes, lint, validasi Compose, Docker image build, serta smoke test container dan migrasi SQLite sukses**. Pull request tidak pernah menerima secrets production. Bila secret deployment belum lengkap, workflow sengaja melewati langkah deploy dan memberi notice; validasi CI tetap berjalan. Pull request dan branch fitur tidak mengubah VPS production.
+Workflow **tidak** mengontrol PC Windows secara otomatis. Ini disengaja: tidak perlu membuka SSH dari internet, memasang runner yang punya akses ke PC, atau memasukkan credential perangkat pribadi ke GitHub. Untuk memperbarui Hub, jalankan git pull --ff-only origin main, lalu jalankan kembali script.
 
-## 6. Operasi, backup, dan status kesiapan
+## 8. Kenapa tidak memakai Render Free untuk database ini?
 
-- Database SQLite WAL hanya disimpan di `sistem-agen/data/`; jangan menghapus folder itu ketika memperbarui container.
-- Saat ini belum ada backup off-site terjadwal yang terpasang. Sebelum menyimpan data kerja nyata, implementasikan backup SQLite konsisten (SQLite backup API / `.backup`) ke penyimpanan S3-compatible terpisah dan uji restore. Simpan sekurangnya 14 hari sesuai spesifikasi.
-- Artefak video besar, signed upload/download S3, Telegram notifications/approvals, pipeline state machine video, dan dashboard belum tersedia pada M1 ini. Jangan mengaktifkan 7 agen untuk produksi harian hanya karena `/health` merespons.
-- Ketika ada perubahan skema selanjutnya, buat migration Alembic baru dan pastikan CI serta backup/restore diuji sebelum deploy.
-- Revoke/rotate API key agen melalui `python -m hub.admin revoke-agent` / `rotate-key` bila key diduga bocor.
+Render Free web services bisa tidur setelah 15 menit tanpa traffic dan filesystem lokalnya bersifat ephemeral. Database SQLite lokal dapat hilang saat restart, redeploy, atau spin down; karena itu layanan tersebut tidak cocok untuk deployment Hub ini tanpa mengubah database dan menerima batasan layanan gratis.
 
-## 7. Rollback aplikasi
+## 9. Jalur cloud selalu aktif di masa depan (opsional)
 
-Simpan commit deployment terakhir pada catatan rilis. Untuk kembali ke versi source sebelumnya, checkout commit yang diketahui aman pada VPS lalu jalankan:
+Oracle OCI memiliki resource Always Free, tetapi proses pendaftaran mengharuskan kartu kredit/debit yang berfungsi seperti kartu kredit untuk verifikasi dan dapat menimbulkan authorization hold sementara. Itu tidak cocok dijadikan prasyarat untuk deployment Rp0 tanpa kartu. Tidak perlu mendaftar sekarang.
 
-```bash
-cd /opt/automation-content
-git checkout <commit-sha-yang-diketahui-aman>
-cd sistem-agen
-docker compose build --pull hub
-docker compose up -d --remove-orphans
-```
-
-Rollback source tidak membatalkan perubahan database. Ambil backup valid sebelum menjalankan migration yang mengubah skema.
+Bila kelak ada komputer/server lain yang bisa dibiarkan menyala, jalur hosting dapat dipindah tanpa mengubah pemisahan proyek. Automation-Content tetap memakai database dan kredensial sendiri, terpisah dari Automation-Business.
