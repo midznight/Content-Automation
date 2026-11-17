@@ -1,0 +1,113 @@
+name: Automation-Content CI and Deploy
+
+on:
+  push:
+    branches: [main, "feat/**"]
+    paths:
+      - "sistem-agen/**"
+      - ".github/workflows/content-hub.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "sistem-agen/**"
+      - ".github/workflows/content-hub.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: automation-content-hub-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Python tests, lint, and Docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project and development dependencies
+        working-directory: sistem-agen
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Run automated tests
+        working-directory: sistem-agen
+        run: pytest -q
+
+      - name: Run Ruff checks
+        working-directory: sistem-agen
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Validate Compose and build the production image
+        working-directory: sistem-agen
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          docker build --pull -t automation-content-hub:ci .
+
+  deploy:
+    name: Deploy to the VPS
+    needs: validate
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check whether VPS deployment is configured
+        id: config
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
+          VPS_SSH_USER: ${{ secrets.VPS_SSH_USER }}
+          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          VPS_DEPLOY_PATH: ${{ secrets.VPS_DEPLOY_PATH }}
+        run: |
+          if [ -n "$VPS_HOST" ] && [ -n "$VPS_SSH_PORT" ] && [ -n "$VPS_SSH_USER" ] \
+            && [ -n "$VPS_SSH_PRIVATE_KEY" ] && [ -n "$VPS_KNOWN_HOSTS" ] \
+            && [ -n "$VPS_DEPLOY_PATH" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::VPS secrets belum lengkap. CI lulus, deploy dilewati sampai konfigurasi VPS ditambahkan."
+          fi
+
+      - name: Configure SSH
+        if: steps.config.outputs.configured == 'true'
+        env:
+          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+
+      - name: Pull main and deploy the Hub
+        if: steps.config.outputs.configured == 'true'
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
+          VPS_SSH_USER: ${{ secrets.VPS_SSH_USER }}
+          VPS_DEPLOY_PATH: ${{ secrets.VPS_DEPLOY_PATH }}
+        run: |
+          ssh \
+            -i "$HOME/.ssh/id_ed25519" \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -p "$VPS_SSH_PORT" \
+            "$VPS_SSH_USER@$VPS_HOST" \
+            "cd '$VPS_DEPLOY_PATH' && git pull --ff-only origin main && cd sistem-agen && docker compose pull caddy && docker compose build --pull hub && docker compose up -d --remove-orphans && docker compose ps"
