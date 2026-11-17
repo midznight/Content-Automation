@@ -55,13 +55,31 @@ jobs:
         run: |
           cp .env.example .env
           docker compose config --quiet
-          docker build --pull -t automation-content-hub:ci .
+          docker compose build --pull hub
+
+      - name: Run container and database migration smoke test
+        working-directory: sistem-agen
+        run: |
+          mkdir -p data
+          sudo chown 10001:10001 data
+          docker compose up -d hub
+          for attempt in $(seq 1 30); do
+            if docker compose exec -T hub python -c 'import json, urllib.request; response = urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3); body = json.load(response); assert body["status"] == "ok", body'; then
+              docker compose down
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs --tail=100 hub
+          docker compose down
+          exit 1
 
   deploy:
     name: Deploy to the VPS
     needs: validate
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 15
     steps:
       - name: Check whether VPS deployment is configured
