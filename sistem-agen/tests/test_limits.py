@@ -83,3 +83,31 @@ def test_mcp_host_allowlist_accepts_expected_host_and_rejects_other_hosts():
 
     assert allowed.status_code != 421
     assert blocked.status_code == 421
+
+
+def test_mcp_initialize_uses_json_response_for_quick_tunnels():
+    LimitsMiddleware.reset_limits()
+    initialize = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "quick-tunnel-test", "version": "1.0.0"},
+        },
+    }
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/mcp",
+            json=initialize,
+            headers={
+                "Host": "localhost",
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
