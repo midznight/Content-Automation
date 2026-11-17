@@ -450,7 +450,7 @@ function createServer(agent: AuthenticatedAgent, db: D1Database): McpServer {
         title: z.string().min(1).max(255),
         payload: z.record(z.string(), z.unknown()),
         video_id: z.string().max(64).optional(),
-        priority: z.enum(["low", "normal", "high", "urgent"]).default("normal"),
+        priority: z.string().min(1).max(32).default("normal"),
         due_at: z.string().optional(),
         reassigned_from: z.string().max(64).optional(),
       },
@@ -482,29 +482,40 @@ function createServer(agent: AuthenticatedAgent, db: D1Database): McpServer {
       const statements: D1PreparedStatement[] = [];
 
       if (reassigned_from) {
-        statements.push(
-          db
-            .prepare(
-              "UPDATE tasks SET status = 'superseded', updated_at = ? " +
-                "WHERE id = ? AND status IN ('blocked', 'failed', 'stale')",
-            )
-            .bind(createdAt, reassigned_from),
-        );
-        statements.push(
-          db
-            .prepare(
-              "INSERT INTO events (ts, actor, action, task_id, video_id, detail) " +
-                "SELECT ?, ?, 'task_status_superseded', id, video_id, ? FROM tasks " +
-                "WHERE id = ? AND status = 'superseded' AND updated_at = ? AND changes() = 1",
-            )
-            .bind(
-              createdAt,
-              agent.name,
-              JSON.stringify({ previous_status: "blocked_or_failed_or_stale", new_status: "superseded", reassigned_to_role: to }),
-              reassigned_from,
-              createdAt,
-            ),
-        );
+        const oldTask = await db
+          .prepare("SELECT id, status FROM tasks WHERE id = ? LIMIT 1")
+          .bind(reassigned_from)
+          .first<{ id: string; status: string }>();
+
+        if (oldTask && ["blocked", "failed", "stale"].includes(oldTask.status)) {
+          statements.push(
+            db
+              .prepare(
+                "UPDATE tasks SET status = 'superseded', updated_at = ? " +
+                  "WHERE id = ? AND status IN ('blocked', 'failed', 'stale')",
+              )
+              .bind(createdAt, reassigned_from),
+          );
+          statements.push(
+            db
+              .prepare(
+                "INSERT INTO events (ts, actor, action, task_id, video_id, detail) " +
+                  "SELECT ?, ?, 'task_status_superseded', id, video_id, ? FROM tasks " +
+                  "WHERE id = ? AND status = 'superseded' AND updated_at = ? AND changes() = 1",
+              )
+              .bind(
+                createdAt,
+                agent.name,
+                JSON.stringify({
+                  previous_status: oldTask.status,
+                  new_status: "superseded",
+                  reassigned_to_role: to,
+                }),
+                reassigned_from,
+                createdAt,
+              ),
+          );
+        }
       }
 
       statements.push(
