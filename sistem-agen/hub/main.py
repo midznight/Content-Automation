@@ -9,8 +9,24 @@ from hub.db.session import init_db
 from hub.mcp_server import mcp_server
 from hub.middleware import LimitsMiddleware
 
-# Disable local-only DNS rebinding protection so remote agents and test runners can connect
-security_settings = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+import os
+
+
+def _csv_setting(name: str, default: tuple[str, ...] = ()) -> list[str]:
+    """Read a comma-separated allowlist from the environment."""
+    raw_value = os.getenv(name)
+    values = raw_value.split(",") if raw_value is not None else default
+    return [value.strip() for value in values if value.strip()]
+
+
+security_settings = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=_csv_setting(
+        "MCP_ALLOWED_HOSTS",
+        ("localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*", "[::1]:*"),
+    ),
+    allowed_origins=_csv_setting("MCP_ALLOWED_ORIGINS"),
+)
 mcp_app = mcp_server.streamable_http_app(
     streamable_http_path="/mcp",
     transport_security=security_settings,
