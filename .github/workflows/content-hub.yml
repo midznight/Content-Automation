@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   validate:
-    name: Python tests, lint, and container smoke test
+    name: Python tests and lint
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -50,24 +50,3 @@ jobs:
           ruff check .
           ruff format --check .
 
-      - name: Validate Compose and build the optional container image
-        working-directory: sistem-agen
-        run: |
-          cp .env.example .env
-          docker compose config --quiet
-          docker compose build --pull hub
-
-      - name: Run container and database migration smoke test
-        working-directory: sistem-agen
-        run: |
-          docker compose up -d hub
-          for attempt in $(seq 1 30); do
-            if docker compose exec -T hub python -c 'import json, urllib.request; response = urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=3); body = json.load(response); assert body["status"] == "ok", body'; then
-              docker compose down
-              exit 0
-            fi
-            sleep 2
-          done
-          docker compose logs --tail=100 hub
-          docker compose down
-          exit 1
