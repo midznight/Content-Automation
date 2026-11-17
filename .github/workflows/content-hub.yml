@@ -21,7 +21,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  validate:
+  validate-python:
     name: Python tests and lint
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -50,3 +50,29 @@ jobs:
           ruff check .
           ruff format --check .
 
+  validate-cloudflare:
+    name: Cloudflare Worker tests and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: sistem-agen/cloudflare-worker
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sistem-agen/cloudflare-worker/package.json
+
+      - name: Install Cloudflare Worker dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Run permission tests and type checks
+        run: npm run check
+
+      - name: Validate Worker bundle
+        run: npx wrangler deploy --dry-run
