@@ -3,13 +3,13 @@
 from fastapi.testclient import TestClient
 
 from hub.auth import generate_agent_key
-from hub.main import app
+from hub.main import create_app
 from hub.middleware import MAX_PAYLOAD_BYTES, LimitsMiddleware
 
 
 def test_payload_size_limit():
     LimitsMiddleware.reset_limits()
-    with TestClient(app) as client:
+    with TestClient(create_app()) as client:
         # 1. Payload within limit sent to /mcp
         small_body = b'{"jsonrpc": "2.0", "method": "ping", "id": 1}'
         r1 = client.post(
@@ -41,7 +41,7 @@ def test_rate_limit_per_agent():
     agent_a_key = generate_agent_key()
     agent_b_key = generate_agent_key()
 
-    with TestClient(app) as client:
+    with TestClient(create_app()) as client:
         headers_a = {"Authorization": f"Bearer {agent_a_key}"}
         headers_b = {"Authorization": f"Bearer {agent_b_key}"}
 
@@ -59,3 +59,27 @@ def test_rate_limit_per_agent():
         # Agent B has independent rate limit and should still succeed
         res_b = client.get("/health", headers=headers_b)
         assert res_b.status_code == 200
+
+
+def test_mcp_host_allowlist_accepts_expected_host_and_rejects_other_hosts():
+    LimitsMiddleware.reset_limits()
+    body = b'{"jsonrpc": "2.0", "method": "ping", "id": 1}'
+    common_headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+
+    with TestClient(create_app()) as client:
+        allowed = client.post(
+            "/mcp",
+            content=body,
+            headers={**common_headers, "Host": "localhost"},
+        )
+        blocked = client.post(
+            "/mcp",
+            content=body,
+            headers={**common_headers, "Host": "attacker.example"},
+        )
+
+    assert allowed.status_code != 421
+    assert blocked.status_code == 421
