@@ -32,6 +32,7 @@ def create_app() -> FastAPI:
     """Create an app with a fresh, single-use MCP session manager."""
     mcp_app = mcp_server.streamable_http_app(
         streamable_http_path="/mcp",
+        json_response=True,
         transport_security=security_settings,
     )
     session_manager = mcp_server.session_manager
