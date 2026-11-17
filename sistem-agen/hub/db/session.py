@@ -9,10 +9,15 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from hub.db.base import Base
 
-DEFAULT_DB_FILE = Path(__file__).resolve().parent.parent.parent / "hub.db"
+APP_DIR = Path(__file__).resolve().parent.parent.parent
+DEFAULT_DATA_DIR = APP_DIR / "data"
+DEFAULT_DB_FILE = DEFAULT_DATA_DIR / "hub.db"
 DEFAULT_DB_URL = f"sqlite:///{DEFAULT_DB_FILE}"
 
-DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_DB_URL)
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    DEFAULT_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DATABASE_URL = DEFAULT_DB_URL
 
 engine = create_engine(
     DATABASE_URL,
@@ -44,7 +49,6 @@ def init_db(target_engine=engine):
 
 
 def get_db() -> Generator[Session, None, None]:
-    """Dependency for obtaining a database session."""
     db = SessionLocal()
     try:
         yield db
