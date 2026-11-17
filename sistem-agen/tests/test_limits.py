@@ -61,7 +61,6 @@ def test_rate_limit_per_agent():
         assert res_b.status_code == 200
 
 
-
 def test_mcp_host_allowlist_accepts_expected_host_and_rejects_other_hosts():
     LimitsMiddleware.reset_limits()
     body = b'{"jsonrpc": "2.0", "method": "ping", "id": 1}'
