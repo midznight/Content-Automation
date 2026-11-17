@@ -1,0 +1,14 @@
+name = "content-automation-hub"
+main = "src/index.ts"
+compatibility_date = "2026-11-17"
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+[observability]
+enabled = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "content-automation-hub-prod"
+database_id = "d80ecae4-6171-4526-a289-e6c138b5a9c4"
+migrations_dir = "migrations"
