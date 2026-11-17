@@ -1,4 +1,4 @@
-name: Automation-Content CI and Deploy
+name: Automation-Content CI
 
 on:
   push:
@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   validate:
-    name: Python tests, lint, and Docker build
+    name: Python tests, lint, and container smoke test
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -50,7 +50,7 @@ jobs:
           ruff check .
           ruff format --check .
 
-      - name: Validate Compose and build the production image
+      - name: Validate Compose and build the optional container image
         working-directory: sistem-agen
         run: |
           cp .env.example .env
@@ -73,59 +73,3 @@ jobs:
           docker compose logs --tail=100 hub
           docker compose down
           exit 1
-
-  deploy:
-    name: Deploy to the VPS
-    needs: validate
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
-    environment: production
-    timeout-minutes: 15
-    steps:
-      - name: Check whether VPS deployment is configured
-        id: config
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
-          VPS_SSH_USER: ${{ secrets.VPS_SSH_USER }}
-          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
-          VPS_DEPLOY_PATH: ${{ secrets.VPS_DEPLOY_PATH }}
-        run: |
-          if [ -n "$VPS_HOST" ] && [ -n "$VPS_SSH_PORT" ] && [ -n "$VPS_SSH_USER" ] \
-            && [ -n "$VPS_SSH_PRIVATE_KEY" ] && [ -n "$VPS_KNOWN_HOSTS" ] \
-            && [ -n "$VPS_DEPLOY_PATH" ]; then
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::VPS secrets belum lengkap. CI lulus, deploy dilewati sampai konfigurasi VPS ditambahkan."
-          fi
-
-      - name: Configure SSH
-        if: steps.config.outputs.configured == 'true'
-        env:
-          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
-        run: |
-          install -m 700 -d "$HOME/.ssh"
-          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
-          chmod 600 "$HOME/.ssh/id_ed25519"
-          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          chmod 600 "$HOME/.ssh/known_hosts"
-
-      - name: Pull main and deploy the Hub
-        if: steps.config.outputs.configured == 'true'
-        env:
-          VPS_HOST: ${{ secrets.VPS_HOST }}
-          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
-          VPS_SSH_USER: ${{ secrets.VPS_SSH_USER }}
-          VPS_DEPLOY_PATH: ${{ secrets.VPS_DEPLOY_PATH }}
-        run: |
-          ssh \
-            -i "$HOME/.ssh/id_ed25519" \
-            -o IdentitiesOnly=yes \
-            -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes \
-            -p "$VPS_SSH_PORT" \
-            "$VPS_SSH_USER@$VPS_HOST" \
-            "cd '$VPS_DEPLOY_PATH' && git pull --ff-only origin main && cd sistem-agen && docker compose pull caddy && docker compose build --pull hub && docker compose up -d --remove-orphans && docker compose ps"
