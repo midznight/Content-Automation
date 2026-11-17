@@ -59,3 +59,28 @@ def test_rate_limit_per_agent():
         # Agent B has independent rate limit and should still succeed
         res_b = client.get("/health", headers=headers_b)
         assert res_b.status_code == 200
+
+
+
+def test_mcp_host_allowlist_accepts_expected_host_and_rejects_other_hosts():
+    LimitsMiddleware.reset_limits()
+    body = b'{"jsonrpc": "2.0", "method": "ping", "id": 1}'
+    common_headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+
+    with TestClient(app) as client:
+        allowed = client.post(
+            "/mcp",
+            content=body,
+            headers={**common_headers, "Host": "localhost"},
+        )
+        blocked = client.post(
+            "/mcp",
+            content=body,
+            headers={**common_headers, "Host": "attacker.example"},
+        )
+
+    assert allowed.status_code != 421
+    assert blocked.status_code == 421
