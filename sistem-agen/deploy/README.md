@@ -97,7 +97,7 @@ Workflow `.github/workflows/content-hub.yml` menjalankan:
 4. Validasi konfigurasi Docker Compose dan build image.
 5. Untuk push ke `main` setelah semua tes lulus, SSH ke VPS lalu `git pull --ff-only` dan rebuild/restart Compose.
 
-Tambahkan GitHub Actions repository secrets berikut di **Settings → Secrets and variables → Actions**:
+Di GitHub, buat **Settings → Environments → New environment** dengan nama tepat `production`; batasi deployment branch ke `main`. Simpan secrets berikut di environment `production`:
 
 | Secret | Isi |
 |---|---|
@@ -110,7 +110,7 @@ Tambahkan GitHub Actions repository secrets berikut di **Settings → Secrets an
 
 Tambahkan public key pasangannya ke `~/.ssh/authorized_keys` milik akun deploy. Isi `VPS_KNOWN_HOSTS` dari host key VPS yang fingerprint-nya telah diverifikasi melalui console provider; jangan mempercayai hasil `ssh-keyscan` tanpa verifikasi. Workflow menggunakan StrictHostKeyChecking dan tidak menonaktifkan pemeriksaan host.
 
-Setelah semua secret ada, push ke `main` akan deploy otomatis **hanya sesudah job validasi sukses**. Bila secret deployment belum lengkap, workflow sengaja melewati langkah deploy dan memberi notice; validasi CI tetap berjalan. Pull request dan branch fitur tidak mengubah VPS production.
+Job deploy memakai GitHub Environment `production`, sehingga secrets hanya tersedia di job deployment. Setelah semua secret ada, push ke `main` akan deploy otomatis **hanya sesudah tes, lint, validasi Compose, Docker image build, serta smoke test container dan migrasi SQLite sukses**. Pull request tidak pernah menerima secrets production. Bila secret deployment belum lengkap, workflow sengaja melewati langkah deploy dan memberi notice; validasi CI tetap berjalan. Pull request dan branch fitur tidak mengubah VPS production.
 
 ## 6. Operasi, backup, dan status kesiapan
 
