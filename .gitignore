@@ -1,0 +1,31 @@
+# Python runtime and tooling
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Local configuration and secrets
+.env
+**/.env
+.env.*
+!**/.env.example
+
+# Local databases, runtime data, logs, and backups
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+*.log
+sistem-agen/data/
+sistem-agen/backups/
