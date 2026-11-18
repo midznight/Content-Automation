@@ -1296,6 +1296,10 @@ async function createTelegramChatTask(
     .bind(role).first<{ id: string }>();
   if (!active) throw new Error("Akun agen untuk role '" + role + "' belum aktif di Hub.");
   const threadId = await telegramThreadId(chatId);
+  const existingMessage = await env.DB.prepare(
+    "SELECT task_id FROM chat_messages WHERE external_chat_id = ? AND external_message_id = ? AND direction = 'inbound' LIMIT 1",
+  ).bind(chatId, messageId).first<{ task_id: string | null }>();
+  if (existingMessage?.task_id) return existingMessage.task_id;
   const historyRows = await env.DB.prepare(
     "SELECT actor, role, direction, message_text, created_at FROM chat_messages WHERE thread_id = ? ORDER BY created_at DESC LIMIT 8",
   ).bind(threadId).all<Record<string, unknown>>();
@@ -1326,9 +1330,9 @@ async function createTelegramChatTask(
       "INSERT INTO events (ts, actor, action, task_id, detail) VALUES (?, 'pm-telegram', 'telegram_chat_task_created', ?, ?)",
     ).bind(createdAt, taskId, JSON.stringify({ role, type, thread_id: threadId, message_id: messageId })),
     env.DB.prepare(
-      "INSERT INTO chat_messages (id, thread_id, task_id, direction, actor, role, message_text, external_message_id, created_at) " +
-      "VALUES (?, ?, ?, 'inbound', 'pm-telegram', 'pm', ?, ?, ?)",
-    ).bind(newId("msg_"), threadId, taskId, prompt, messageId, createdAt),
+      "INSERT INTO chat_messages (id, thread_id, task_id, direction, actor, role, message_text, external_chat_id, external_message_id, created_at) " +
+      "VALUES (?, ?, ?, 'inbound', 'pm-telegram', 'pm', ?, ?, ?, ?)",
+    ).bind(newId("msg_"), threadId, taskId, prompt, chatId, messageId, createdAt),
   ]);
   return taskId;
 }
@@ -1427,7 +1431,7 @@ async function handleTelegramMessage(env: Env, message: Record<string, unknown>)
       return jsonResponse({ ok: true });
     }
     const result = await decideApproval(env, match[1], parsed.name as "approve" | "reject", match[2] ?? "", "pm-telegram");
-    await send(result.ok ? "Keputusan tersimpan. Tahap video sekarang: " + result.stage : "Tidak dapat memproses approval: " + result.error);
+    if (!result.ok) await send("Tidak dapat memproses approval: " + result.error);
     return jsonResponse({ ok: result.ok });
   }
   if (parsed.name === "ask") {

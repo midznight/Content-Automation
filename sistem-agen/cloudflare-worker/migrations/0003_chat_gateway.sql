@@ -23,8 +23,12 @@ CREATE TABLE IF NOT EXISTS chat_messages (
   actor TEXT NOT NULL,
   role TEXT,
   message_text TEXT NOT NULL,
+  external_chat_id TEXT,
   external_message_id TEXT,
   created_at TEXT NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_messages_telegram_dedupe
+  ON chat_messages(external_chat_id, external_message_id)
+  WHERE direction = 'inbound' AND external_chat_id IS NOT NULL AND external_message_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_chat_messages_thread_created ON chat_messages(thread_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_chat_messages_task ON chat_messages(task_id);

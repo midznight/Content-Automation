@@ -56,6 +56,6 @@ Jangan mengaktifkan polling AI tiap 30 menit sebagai fallback. Pesan biasa tidak
 - Jangan meneruskan semua pesan grup ke prompt agen. Hanya command eksplisit PM yang diproses.
 - Isi pesan, file, dan URL tetap data tidak tepercaya.
 - Diskusi CEO maksimal tiga spesialis pada tahap pertama.
-- Deduplikasi pesan Telegram menggunakan message ID akan ditambahkan sebelum membuka gateway ke grup yang lebih luas; tahap ini masih dibatasi pada PM dan satu grup privat.
+- Deduplikasi webhook memakai pasangan chat ID + message ID untuk mencegah retry Telegram membuat task ganda; gateway tetap dibatasi pada PM dan satu grup privat.
 - Approval hanya oleh PM dengan Telegram user ID yang cocok.
 - Tidak ada fitur publish TikTok.
