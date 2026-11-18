@@ -83,16 +83,18 @@ function toolData(response, name) {
 
 async function cleanup() {
   const videos = (await d1("SELECT id FROM videos WHERE topic = ?", [topic])).results || [];
+  let auditEventsRetained = 0;
   for (const video of videos) {
+    auditEventsRetained += Number((await d1("SELECT COUNT(*) AS count FROM events WHERE video_id = ?", [video.id])).results?.[0]?.count ?? 0);
     for (const table of ["approvals", "metrics", "artifacts", "tasks"]) {
       await d1("DELETE FROM " + table + " WHERE video_id = ?", [video.id]);
     }
     await d1("DELETE FROM videos WHERE id = ?", [video.id]);
   }
   await d1("DELETE FROM agents WHERE id = ?", [agentId]);
-  const left = (await d1("SELECT (SELECT COUNT(*) FROM videos WHERE topic = ?) AS videos, (SELECT COUNT(*) FROM agents WHERE id = ?) AS agents, (SELECT COUNT(*) FROM events WHERE video_id IN (SELECT id FROM videos WHERE topic = ?)) AS audit_events", [topic, agentId, topic])).results?.[0];
+  const left = (await d1("SELECT (SELECT COUNT(*) FROM videos WHERE topic = ?) AS videos, (SELECT COUNT(*) FROM agents WHERE id = ?) AS agents", [topic, agentId])).results?.[0];
   if (Number(left?.videos) !== 0 || Number(left?.agents) !== 0) throw new Error("Test records remain after cleanup.");
-  console.log("PASS: append-only audit events retained for traceability (" + Number(left?.audit_events ?? 0) + " rows).");
+  console.log("PASS: append-only audit events retained for traceability (" + auditEventsRetained + " rows).");
 }
 
 let failed = false;
