@@ -1080,12 +1080,13 @@ async function artifactUploadRoute(request: Request, env: Env, uploadId: string)
       await env.DB.prepare("UPDATE upload_sessions SET status = 'failed' WHERE id = ?").bind(uploadId).run();
       return jsonResponse({ error: "SHA-256 objek R2 tidak cocok dengan checksum yang dijanjikan." }, 400);
     }
+    const sizeBytes = stored.size;
     const timestamp = nowIso();
     await env.DB.batch([
-      env.DB.prepare("UPDATE upload_sessions SET status = 'uploaded', sha256 = ?, size_bytes = ?, uploaded_at = ? WHERE id = ? AND status = 'uploading'").bind(digest, bytesWritten, timestamp, uploadId),
-      env.DB.prepare("INSERT INTO events (ts, actor, action, task_id, video_id, detail) VALUES (?, ?, 'artifact_uploaded', ?, ?, ?)").bind(timestamp, agent.name, session.task_id, session.video_id, JSON.stringify({ upload_id: uploadId, kind: session.kind, size_bytes: bytesWritten, sha256: digest })),
+      env.DB.prepare("UPDATE upload_sessions SET status = 'uploaded', sha256 = ?, size_bytes = ?, uploaded_at = ? WHERE id = ? AND status = 'uploading'").bind(digest, sizeBytes, timestamp, uploadId),
+      env.DB.prepare("INSERT INTO events (ts, actor, action, task_id, video_id, detail) VALUES (?, ?, 'artifact_uploaded', ?, ?, ?)").bind(timestamp, agent.name, session.task_id, session.video_id, JSON.stringify({ upload_id: uploadId, kind: session.kind, size_bytes: sizeBytes, sha256: digest })),
     ]);
-    return jsonResponse({ ok: true, upload_id: uploadId, sha256: digest, size_bytes: bytesWritten });
+    return jsonResponse({ ok: true, upload_id: uploadId, sha256: digest, size_bytes: sizeBytes });
   } catch (error) {
     await env.ARTIFACTS.delete(session.object_key).catch(() => undefined);
     await env.DB.prepare("UPDATE upload_sessions SET status = 'failed' WHERE id = ?").bind(uploadId).run();
