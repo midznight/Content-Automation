@@ -69,7 +69,7 @@ export function validateScriptResult(value: unknown): string[] {
   if (typeof result?.hook !== "string" || !result.hook.trim()) errors.push("hook wajib diisi.");
   if (!Array.isArray(result?.beats) || result.beats.length < 1) errors.push("minimal satu beat wajib tersedia.");
   if (!Array.isArray(result?.claims) || result.claims.length < 1) errors.push("minimal satu klaim wajib tersedia.");
-  if (!Number.isInteger(Number(result?.durasi_detik)) || Number(result?.durasi_detik) < 10 || Number(result?.durasi_detik) > 90) errors.push("durasi_detik harus antara 10 dan 90.");
+  if (typeof result?.durasi_detik !== "number" || !Number.isInteger(result.durasi_detik) || result.durasi_detik < 10 || result.durasi_detik > 90) errors.push("durasi_detik harus berupa angka bulat antara 10 dan 90.");
   const claims = Array.isArray(result?.claims) ? result.claims.map(asRecord).filter(Boolean) : [];
   if (claims.some((claim) => typeof claim?.id !== "string" || typeof claim?.text !== "string" || !claim.text.trim())) errors.push("setiap klaim harus memiliki id dan text.");
   return errors;
