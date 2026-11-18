@@ -851,7 +851,7 @@ function createServer(agent: AuthenticatedAgent, env: Env, origin: string): McpS
     const task = await db.prepare("SELECT video_id, to_agent, status FROM tasks WHERE id = ? LIMIT 1").bind(task_id).first<{ video_id: string | null; to_agent: string; status: string }>();
     if (!task || task.to_agent !== agent.role || task.status !== "claimed" || task.video_id !== session.video_id) return toolError("Tugas bukan lagi milik agen ini atau status bukan claimed.");
     const artifactId = newId("art_"); const timestamp = nowIso();
-    await db.batch([
+    const batch = await db.batch([
       db.prepare("UPDATE upload_sessions SET status = 'registered' WHERE id = ? AND status = 'uploaded'").bind(upload_id),
       db.prepare("INSERT INTO artifacts (id, upload_id, task_id, video_id, kind, name, uri, sha256, size_bytes, created_by, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1")
         .bind(artifactId, upload_id, task_id, session.video_id, session.kind, session.file_name, "r2://" + session.object_key, session.sha256, session.size_bytes, agent.name, timestamp),
@@ -1081,8 +1081,8 @@ async function artifactUploadRoute(request: Request, env: Env, uploadId: string)
   if (!constantTimeEqual(session.token_hash, await sha256(token))) return jsonResponse({ error: "Token unggah tidak valid." }, 401);
   const task = await env.DB.prepare("SELECT to_agent, status FROM tasks WHERE id = ? LIMIT 1").bind(session.task_id)
     .first<{ to_agent: string; status: string }>();
-  const agent = await env.DB.prepare("SELECT role, active FROM agents WHERE id = ? LIMIT 1").bind(session.agent_id)
-    .first<{ role: string; active: number }>();
+  const agent = await env.DB.prepare("SELECT name, role, active FROM agents WHERE id = ? LIMIT 1").bind(session.agent_id)
+    .first<{ name: string; role: string; active: number }>();
   if (!task || !agent || agent.active !== 1 || task.to_agent !== agent.role || task.status !== "claimed") {
     return jsonResponse({ error: "Agen atau tugas tidak lagi berhak melakukan unggah ini." }, 403);
   }
