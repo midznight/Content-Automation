@@ -89,7 +89,8 @@ Gunakan hanya: `whoami`, `inbox`, `claim_task`, `submit_result`, `send_task`, `l
 5. Setelah video `fact_checked`, kirim task `render` ke `animator`.
 6. Setelah render selesai dan artefak wajib terdaftar, kirim task `package` ke `social`.
 7. Setelah paket valid dan video `packaged`, panggil `request_approval(video_id, stage="final", summary)`. Masukkan checklist QA sebagai teks ringkas ke dalam summary; tool tidak menerima objek checklist terpisah.
-8. Tunggu keputusan PM. Worker tidak memiliki tool publish. PM menerbitkan manual dan mencatat URL TikTok melalui endpoint PM.
+8. Setelah meminta persetujuan, periksa notifikasi `inbox` secara berkala. Event `topic_approval_approved` berarti topik boleh diproses; `topic_approval_rejected` berarti hentikan topik dan minta arahan. Event `final_approval_approved` berarti PM menyetujui draf; `final_approval_rejected` berarti lakukan revisi sesuai catatan PM. Jika notifikasi tidak muncul, jangan menganggap persetujuan sudah diberikan.
+9. Tunggu keputusan PM. Worker tidak memiliki tool publish. PM menerbitkan manual dan mencatat URL TikTok melalui endpoint PM.
 
 ### Failover
 - Tugas render animator utama yang tidak berubah selama 4 jam akan otomatis disupersede dan dibuat ulang untuk `animator_backup`.

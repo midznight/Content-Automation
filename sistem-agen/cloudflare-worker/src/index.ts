@@ -351,7 +351,7 @@ function createServer(agent: AuthenticatedAgent, env: Env, origin: string): McpS
       if (agent.role === "ceo") {
         const eventRows = await db
           .prepare(
-            "SELECT * FROM events WHERE action IN ('result_ready', 'needs_reassign') ORDER BY ts DESC LIMIT ?",
+            "SELECT * FROM events WHERE action IN ('result_ready', 'needs_reassign', 'topic_approval_approved', 'topic_approval_rejected', 'final_approval_approved', 'final_approval_rejected') ORDER BY ts DESC LIMIT ?",
           )
           .bind(limit)
           .all<EventRow>();
@@ -1183,7 +1183,7 @@ async function pmRoute(request: Request, env: Env, url: URL): Promise<Response> 
     if (publishedMatch) {
       let body: { tiktok_url?: string };
       try { body = await request.json() as { tiktok_url?: string }; } catch { return jsonResponse({ error: "Body harus JSON valid." }, 400); }
-      if (typeof body.tiktok_url !== "string" || !/^https:\/\/(www\.)?tiktok\.com\//i.test(body.tiktok_url)) return jsonResponse({ error: "tiktok_url harus berupa URL TikTok yang valid." }, 400);
+      if (typeof body.tiktok_url !== "string" || !/^https:\/\/(?:(?:www|vt|vm)\.)?tiktok\.com\//i.test(body.tiktok_url)) return jsonResponse({ error: "tiktok_url harus berupa URL TikTok yang valid." }, 400);
       const videoId = decodeURIComponent(publishedMatch[1]); const timestamp = nowIso();
       const update = await env.DB.prepare("UPDATE videos SET stage = 'published', published_at = ?, tiktok_url = ?, updated_at = ? WHERE id = ? AND stage = 'approved'").bind(timestamp, body.tiktok_url, timestamp, videoId).run();
       if ((update.meta?.changes ?? 0) !== 1) return jsonResponse({ error: "Video tidak ditemukan atau belum disetujui PM." }, 409);
