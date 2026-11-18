@@ -31,6 +31,8 @@ export const TASK_ROUTING_MATRIX: Record<string, { senders: ReadonlySet<string>;
   metrics_report: { senders: new Set(["ceo", "system"]), receivers: new Set(["analyst"]) },
   daily_report: { senders: new Set(["system"]), receivers: new Set(["ceo"]) },
   echo: { senders: new Set(["ceo"]), receivers: WORKER_ROLES },
+  chat_message: { senders: new Set(["ceo"]), receivers: WORKER_ROLES },
+  group_discussion: { senders: new Set(["pm"]), receivers: new Set(["ceo"]) },
 };
 
 const TOOL_PERMISSIONS: Record<string, ReadonlySet<Role>> = {

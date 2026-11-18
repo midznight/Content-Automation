@@ -3,6 +3,7 @@ import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
 import { evaluateFactCheckGate, validatePackageResult, validateScriptResult } from "./pipeline";
 import { isRole, ROLES, validateTaskRoute, validateToolAccess, type Role } from "./permissions";
+import { formatTelegramAgentReply, parseTelegramCommand } from "./telegram";
 
 interface D1Result<T = Record<string, unknown>> {
   results?: T[];
@@ -49,6 +50,7 @@ interface Env {
   PM_TOKEN?: string;
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_PM_CHAT_ID?: string;
+  TELEGRAM_GROUP_CHAT_ID?: string;
   TELEGRAM_PM_USER_ID?: string;
   TELEGRAM_WEBHOOK_SECRET?: string;
 }
@@ -194,17 +196,32 @@ function hexToBytes(hex: string): ArrayBuffer {
 function bytesToHex(bytes: ArrayBuffer): string {
   return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
-async function notifyPM(env: Env, message: string, replyMarkup?: Record<string, unknown>): Promise<void> {
-  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_PM_CHAT_ID) return;
+async function telegramGroupChatId(env: Env): Promise<string | null> {
+  if (env.TELEGRAM_GROUP_CHAT_ID) return env.TELEGRAM_GROUP_CHAT_ID;
+  try {
+    const setting = await env.DB.prepare("SELECT value FROM system_settings WHERE key = 'telegram_group_chat_id' LIMIT 1").first<{ value: string }>();
+    return setting?.value ?? null;
+  } catch {
+    return null;
+  }
+}
+async function sendTelegramMessage(env: Env, chatId: string, message: string, replyMarkup?: Record<string, unknown>): Promise<void> {
+  if (!env.TELEGRAM_BOT_TOKEN) return;
   try {
     const response = await fetch("https://api.telegram.org/bot" + env.TELEGRAM_BOT_TOKEN + "/sendMessage", {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chat_id: env.TELEGRAM_PM_CHAT_ID, text: message, disable_web_page_preview: true, ...(replyMarkup ? { reply_markup: replyMarkup } : {}) }),
+      body: JSON.stringify({ chat_id: chatId, text: message.slice(0, 3900), disable_web_page_preview: true, ...(replyMarkup ? { reply_markup: replyMarkup } : {}) }),
     });
     if (!response.ok) console.error(JSON.stringify({ event: "telegram_notify_failed", status: response.status }));
   } catch {
     console.error(JSON.stringify({ event: "telegram_notify_failed", reason: "network_error" }));
   }
+}
+async function notifyPM(env: Env, message: string, replyMarkup?: Record<string, unknown>): Promise<void> {
+  if (!env.TELEGRAM_BOT_TOKEN) return;
+  const chatId = await telegramGroupChatId(env) ?? env.TELEGRAM_PM_CHAT_ID;
+  if (!chatId) return;
+  await sendTelegramMessage(env, chatId, message, replyMarkup);
 }
 async function decideApproval(env: Env, approvalId: string, decision: "approve" | "reject", note: string, actor: string): Promise<{ ok: boolean; error?: string; video_id?: string; stage?: string }> {
   const approval = await env.DB.prepare("SELECT * FROM approvals WHERE id = ? LIMIT 1").bind(approvalId).first<ApprovalRow>();
@@ -587,6 +604,20 @@ function createServer(agent: AuthenticatedAgent, env: Env, origin: string): McpS
         return toolError("Tugas tercatat, tetapi tahap video tidak dapat diperbarui. Hub perlu diperiksa.");
       }
       if (task.type === "fact_check" && status === "done" && !nextVideoStage) await notifyPM(env, "Fact-check belum lolos untuk video " + task.video_id + ". " + gateReasons.join(" "));
+      if (task.type === "chat_message" || task.type === "group_discussion") {
+        const chatPayload = parseJson<Record<string, unknown>>(task.payload, {});
+        const threadId = typeof chatPayload.thread_id === "string" ? chatPayload.thread_id : "";
+        if (chatPayload.channel === "telegram" && threadId) {
+          const reply = formatTelegramAgentReply(agent.role, status, normalizedResult, task_id, blocked_reason);
+          const replyAt = nowIso();
+          await env.DB.batch([
+            env.DB.prepare("INSERT INTO chat_messages (id, thread_id, task_id, direction, actor, role, message_text, created_at) VALUES (?, ?, ?, 'outbound', ?, ?, ?, ?)")
+              .bind(newId("msg_"), threadId, task_id, agent.name, agent.role, reply, replyAt),
+            env.DB.prepare("UPDATE chat_threads SET updated_at = ? WHERE id = ?").bind(replyAt, threadId),
+          ]);
+          await notifyPM(env, reply);
+        }
+      }
       return textResult({
         task_id, status, notification: notificationAction, video_stage: nextVideoStage,
         gate_pass: task.type === "fact_check" && status === "done" ? normalizedResult.gate_pass : undefined,
@@ -1250,18 +1281,210 @@ async function pmRoute(request: Request, env: Env, url: URL): Promise<Response> 
   if (request.method === "GET" && artifactMatch) return artifactDownloadRoute(request, env, decodeURIComponent(artifactMatch[1]), true);
   return jsonResponse({ error: "PM route tidak ditemukan." }, 404);
 }
+const TELEGRAM_AGENT_ROLES = ["ceo", "strategist", "fact_checker", "animator", "animator_backup", "analyst", "social"] as const;
+type TelegramAgentRole = (typeof TELEGRAM_AGENT_ROLES)[number];
+
+async function telegramThreadId(chatId: string): Promise<string> {
+  return "thr_tg_" + (await sha256(chatId)).slice(0, 20);
+}
+
+async function createTelegramChatTask(
+  env: Env, role: TelegramAgentRole, type: "chat_message" | "group_discussion",
+  prompt: string, chatId: string, messageId: string, username: string,
+): Promise<string> {
+  const active = await env.DB.prepare("SELECT id FROM agents WHERE role = ? AND active = 1 LIMIT 1")
+    .bind(role).first<{ id: string }>();
+  if (!active) throw new Error("Akun agen untuk role '" + role + "' belum aktif di Hub.");
+  const threadId = await telegramThreadId(chatId);
+  const historyRows = await env.DB.prepare(
+    "SELECT actor, role, direction, message_text, created_at FROM chat_messages WHERE thread_id = ? ORDER BY created_at DESC LIMIT 8",
+  ).bind(threadId).all<Record<string, unknown>>();
+  const history = (historyRows.results ?? []).reverse().map((row) => ({
+    actor: row.actor, role: row.role, direction: row.direction,
+    text: String(row.message_text ?? "").slice(0, 1200), created_at: row.created_at,
+  }));
+  const taskId = newId("tsk_");
+  const createdAt = nowIso();
+  const payload = {
+    channel: "telegram", thread_id: threadId, chat_id: chatId,
+    telegram_message_id: messageId, requested_by: username || "PM", prompt,
+    conversation_history: history,
+    instructions: type === "group_discussion"
+      ? "Pimpin diskusi multi-agen. Pilih maksimal tiga spesialis yang relevan, kumpulkan hasil mereka melalui Hub, baca hasil penuh dengan get_task_result, lalu submit_result pada task diskusi asli dengan result.answer dan result.consulted. Jangan membuat diskusi rekursif."
+      : "Jawab pertanyaan PM secara langsung dan ringkas. Kirim hasil melalui submit_result dengan result.answer. Jangan mengubah state pipeline atau melakukan publikasi.",
+  };
+  await env.DB.batch([
+    env.DB.prepare(
+      "INSERT INTO chat_threads (id, channel, external_chat_id, created_by, created_at, updated_at) VALUES (?, 'telegram', ?, 'pm-telegram', ?, ?) " +
+      "ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at",
+    ).bind(threadId, chatId, createdAt, createdAt),
+    env.DB.prepare(
+      "INSERT INTO tasks (id, type, title, payload, priority, from_agent, to_agent, status, attempt, created_at, updated_at) " +
+      "VALUES (?, ?, ?, ?, 'normal', 'pm-telegram', ?, 'queued', 1, ?, ?)",
+    ).bind(taskId, type, "Telegram " + (type === "group_discussion" ? "discussion" : "chat") + ": " + prompt.slice(0, 160), JSON.stringify(payload), role, createdAt, createdAt),
+    env.DB.prepare(
+      "INSERT INTO events (ts, actor, action, task_id, detail) VALUES (?, 'pm-telegram', 'telegram_chat_task_created', ?, ?)",
+    ).bind(createdAt, taskId, JSON.stringify({ role, type, thread_id: threadId, message_id: messageId })),
+    env.DB.prepare(
+      "INSERT INTO chat_messages (id, thread_id, task_id, direction, actor, role, message_text, external_message_id, created_at) " +
+      "VALUES (?, ?, ?, 'inbound', 'pm-telegram', 'pm', ?, ?, ?)",
+    ).bind(newId("msg_"), threadId, taskId, prompt, messageId, createdAt),
+  ]);
+  return taskId;
+}
+
+async function handleTelegramMessage(env: Env, message: Record<string, unknown>): Promise<Response> {
+  const from = message.from as Record<string, unknown> | undefined;
+  const chat = message.chat as Record<string, unknown> | undefined;
+  const chatId = String(chat?.id ?? "");
+  const chatType = String(chat?.type ?? "");
+  if (!chatId || from?.is_bot === true || String(from?.id ?? "") !== String(env.TELEGRAM_PM_USER_ID ?? "")) return jsonResponse({ ok: true });
+  if (chatType !== "group" && chatType !== "supergroup") return jsonResponse({ ok: true });
+  const parsed = typeof message.text === "string" ? parseTelegramCommand(message.text) : null;
+  if (!parsed) return jsonResponse({ ok: true });
+  const send = (text: string) => sendTelegramMessage(env, chatId, text);
+
+  if (parsed.name === "bind") {
+    const configured = await telegramGroupChatId(env);
+    if (env.TELEGRAM_GROUP_CHAT_ID && env.TELEGRAM_GROUP_CHAT_ID !== chatId) {
+      await send("Grup ini tidak cocok dengan TELEGRAM_GROUP_CHAT_ID yang dikonfigurasi.");
+      return jsonResponse({ ok: true });
+    }
+    if (configured && configured !== chatId) {
+      await send("Gateway sudah terikat ke grup lain. Jangan memindahkan binding tanpa mengganti konfigurasi secara sengaja.");
+      return jsonResponse({ ok: true });
+    }
+    if (!env.TELEGRAM_GROUP_CHAT_ID) {
+      await env.DB.prepare(
+        "INSERT INTO system_settings (key, value, updated_at) VALUES ('telegram_group_chat_id', ?, ?) ON CONFLICT(key) DO NOTHING",
+      ).bind(chatId, nowIso()).run();
+    }
+    if (await telegramGroupChatId(env) !== chatId) {
+      await send("Binding grup gagal diverifikasi. Hubungi admin sistem.");
+      return jsonResponse({ ok: true });
+    }
+    await send("Grup Telegram berhasil diikat ke Content-Automation Hub. Ketik /help untuk melihat perintah.");
+    return jsonResponse({ ok: true });
+  }
+
+  const groupId = await telegramGroupChatId(env);
+  if (!groupId || groupId !== chatId) {
+    await send("Grup belum terdaftar. PM harus menjalankan /bind@NamaBot terlebih dahulu.");
+    return jsonResponse({ ok: true });
+  }
+  const username = typeof from?.username === "string" ? from.username : "PM";
+  const messageId = String(message.message_id ?? "");
+
+  if (parsed.name === "help" || parsed.name === "start") {
+    await send(
+      "Content-Automation Chat Gateway\n" +
+      "/ask <role> <pertanyaan> — tanya satu agen\n" +
+      "/discuss <topik> — CEO memimpin diskusi maksimal tiga spesialis\n" +
+      "/status — ringkasan sistem tanpa membangunkan AI\n" +
+      "/agents — daftar agen aktif\n" +
+      "/approvals — daftar approval menunggu\n" +
+      "/approve <approval_id> — setujui\n" +
+      "/reject <approval_id> <catatan> — tolak\n" +
+      "/help — bantuan"
+    );
+    return jsonResponse({ ok: true });
+  }
+  if (parsed.name === "status") {
+    const [tasks, videos, approvals] = await Promise.all([
+      env.DB.prepare("SELECT status, COUNT(*) AS count FROM tasks GROUP BY status").all<{ status: string; count: number }>(),
+      env.DB.prepare("SELECT stage, COUNT(*) AS count FROM videos GROUP BY stage").all<{ stage: string; count: number }>(),
+      env.DB.prepare("SELECT COUNT(*) AS count FROM approvals WHERE decision IS NULL").first<{ count: number }>(),
+    ]);
+    const taskSummary = (tasks.results ?? []).map((row) => row.status + ": " + row.count).join(" · ") || "belum ada";
+    const videoSummary = (videos.results ?? []).map((row) => row.stage + ": " + row.count).join(" · ") || "belum ada";
+    await send("Content-Automation Status\nTask — " + taskSummary + "\nVideo — " + videoSummary +
+      "\nApproval pending — " + (approvals?.count ?? 0) + "\n\nPemeriksaan ini membaca D1 dan tidak memanggil model AI.");
+    return jsonResponse({ ok: true });
+  }
+  if (parsed.name === "agents") {
+    const agents = await env.DB.prepare("SELECT name, role, vendor, active, last_seen_at FROM agents ORDER BY role, name")
+      .all<{ name: string; role: string; vendor: string; active: number; last_seen_at: string | null }>();
+    const body = (agents.results ?? []).map((agent) =>
+      (agent.active === 1 ? "● " : "○ ") + agent.role + " — " + agent.name + " (" + agent.vendor + ")"
+    ).join("\n") || "Belum ada akun agen.";
+    await send("Agen terdaftar\n" + body);
+    return jsonResponse({ ok: true });
+  }
+  if (parsed.name === "approvals") {
+    const rows = await env.DB.prepare(
+      "SELECT a.id, a.stage, a.summary, v.topic FROM approvals a JOIN videos v ON v.id = a.video_id WHERE a.decision IS NULL ORDER BY a.requested_at LIMIT 10",
+    ).all<{ id: string; stage: string; summary: string | null; topic: string }>();
+    const body = (rows.results ?? []).map((row) =>
+      row.id + " · " + row.stage + " · " + row.topic + (row.summary ? "\n" + row.summary.slice(0, 300) : "")
+    ).join("\n\n") || "Tidak ada approval yang menunggu.";
+    await send("Approval pending\n" + body);
+    return jsonResponse({ ok: true });
+  }
+  if (parsed.name === "approve" || parsed.name === "reject") {
+    const match = parsed.args.match(/^([a-zA-Z0-9_-]+)(?:\s+([\s\S]*))?$/);
+    if (!match) {
+      await send("Format: /" + parsed.name + " <approval_id>" + (parsed.name === "reject" ? " <catatan>" : ""));
+      return jsonResponse({ ok: true });
+    }
+    const result = await decideApproval(env, match[1], parsed.name as "approve" | "reject", match[2] ?? "", "pm-telegram");
+    await send(result.ok ? "Keputusan tersimpan. Tahap video sekarang: " + result.stage : "Tidak dapat memproses approval: " + result.error);
+    return jsonResponse({ ok: result.ok });
+  }
+  if (parsed.name === "ask") {
+    const match = parsed.args.match(/^([a-z_]+)\s+([\s\S]+)$/i);
+    if (!match) {
+      await send("Format: /ask <role> <pertanyaan>\nRole: " + TELEGRAM_AGENT_ROLES.join(", "));
+      return jsonResponse({ ok: true });
+    }
+    const role = match[1].toLowerCase();
+    if (!(TELEGRAM_AGENT_ROLES as readonly string[]).includes(role)) {
+      await send("Role tidak dikenal. Pilih: " + TELEGRAM_AGENT_ROLES.join(", "));
+      return jsonResponse({ ok: true });
+    }
+    try {
+      const taskId = await createTelegramChatTask(env, role as TelegramAgentRole, "chat_message", match[2].trim(), chatId, messageId, username);
+      await send("Pertanyaan masuk ke antrean " + role + ".\nTask ID: " + taskId +
+        "\nRespons akan diposting ke grup setelah agen memproses task melalui Hub.");
+    } catch (error) {
+      await send("Tidak dapat membuat task: " + (error instanceof Error ? error.message : "kesalahan sistem"));
+    }
+    return jsonResponse({ ok: true });
+  }
+  if (parsed.name === "discuss") {
+    if (!parsed.args || parsed.args.length > 1800) {
+      await send("Format: /discuss <topik atau pertanyaan> (maksimal 1800 karakter).");
+      return jsonResponse({ ok: true });
+    }
+    try {
+      const taskId = await createTelegramChatTask(env, "ceo", "group_discussion", parsed.args, chatId, messageId, username);
+      await send("Diskusi masuk ke antrean CEO. CEO akan memilih maksimal tiga spesialis yang relevan.\nTask ID: " + taskId);
+    } catch (error) {
+      await send("Tidak dapat membuat diskusi: " + (error instanceof Error ? error.message : "kesalahan sistem"));
+    }
+    return jsonResponse({ ok: true });
+  }
+  await send("Perintah tidak dikenal. Ketik /help.");
+  return jsonResponse({ ok: true });
+}
+
 async function telegramWebhook(request: Request, env: Env): Promise<Response> {
-  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_PM_CHAT_ID || !env.TELEGRAM_PM_USER_ID || !env.TELEGRAM_WEBHOOK_SECRET) return jsonResponse({ error: "Telegram webhook memerlukan BOT_TOKEN, PM_CHAT_ID, PM_USER_ID, dan WEBHOOK_SECRET." }, 503);
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_PM_USER_ID || !env.TELEGRAM_WEBHOOK_SECRET) {
+    return jsonResponse({ error: "Telegram webhook memerlukan BOT_TOKEN, PM_USER_ID, dan WEBHOOK_SECRET." }, 503);
+  }
   const suppliedSecret = request.headers.get("x-telegram-bot-api-secret-token") ?? "";
   if (!constantTimeEqual(suppliedSecret, env.TELEGRAM_WEBHOOK_SECRET)) return jsonResponse({ error: "Webhook secret tidak valid." }, 401);
   let update: Record<string, unknown>;
   try { update = await request.json() as Record<string, unknown>; } catch { return jsonResponse({ error: "Body Telegram tidak valid." }, 400); }
+  const incomingMessage = update.message as Record<string, unknown> | undefined;
+  if (incomingMessage) return handleTelegramMessage(env, incomingMessage);
+
   const callback = update.callback_query as Record<string, unknown> | undefined;
   if (!callback) return jsonResponse({ ok: true });
-  const message = callback.message as Record<string, unknown> | undefined;
-  const chat = message?.chat as Record<string, unknown> | undefined;
+  const callbackMessage = callback.message as Record<string, unknown> | undefined;
+  const chat = callbackMessage?.chat as Record<string, unknown> | undefined;
   const from = callback.from as Record<string, unknown> | undefined;
-  if (String(chat?.id ?? "") !== String(env.TELEGRAM_PM_CHAT_ID)) return jsonResponse({ error: "Chat tidak diizinkan." }, 403);
+  const allowedChats = [await telegramGroupChatId(env), env.TELEGRAM_PM_CHAT_ID].filter((value): value is string => Boolean(value));
+  if (!allowedChats.includes(String(chat?.id ?? ""))) return jsonResponse({ error: "Chat tidak diizinkan." }, 403);
   if (String(from?.id ?? "") !== String(env.TELEGRAM_PM_USER_ID)) return jsonResponse({ error: "Pengguna bukan PM yang diizinkan." }, 403);
   const match = String(callback.data ?? "").match(/^(approve|reject):([a-zA-Z0-9_-]+)$/);
   if (!match) return jsonResponse({ ok: true });
