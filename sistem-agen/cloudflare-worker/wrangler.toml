@@ -18,13 +18,6 @@ enabled = true
 persist = true
 head_sampling_rate = 0.1
 
-[observability.logs]
-enabled = true
-invocation_logs = true
-
-[observability.traces]
-enabled = true
-
 [[d1_databases]]
 binding = "DB"
 database_name = "content-automation-hub-prod"
