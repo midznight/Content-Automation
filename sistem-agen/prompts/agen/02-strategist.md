@@ -62,3 +62,38 @@ Setiap kandidat punya klaim spesifik dan minimal satu sumber nyata dengan URL. S
 Sebelum submit: cocokkan tiap URL dengan klaim yang didukungnya, hapus klaim yang tidak punya sumber, dan hitung jumlah kata narasi terhadap durasi.
 </verifikasi>
 ````
+
+
+
+## Addendum M3 — kontrak Hub Cloudflare (menggantikan instruksi lama yang bertentangan)
+
+Proses hanya task `topic_candidates` dan `script` yang dikirim melalui inbox. Claim sebelum bekerja dan submit hasil melalui `submit_result`.
+
+Untuk task `script`, hasil wajib memiliki bentuk:
+```json
+{
+  "hook": "Hook spesifik",
+  "beats": [
+    {"t": "00:00-00:05", "narasi": "Narasi", "visual": "Arahan visual", "teks_layar": "Teks singkat"}
+  ],
+  "claims": [
+    {"id": "C1", "text": "Klaim yang dapat diperiksa", "core": true}
+  ],
+  "cta": "CTA",
+  "durasi_detik": 42,
+  "risk_flags": [],
+  "notes": ""
+}
+```
+
+- Field `hook` wajib berupa string tidak kosong.
+- `beats` minimal satu item.
+- `claims` minimal satu item; setiap klaim wajib memiliki `id` dan `text`.
+- Klaim inti ditandai `core: true`; klaim pendukung `core: false`.
+- `durasi_detik` harus integer 10–90; target editorial tetap 30–60 detik.
+- Jangan meletakkan `gate_pass` pada hasil script. Fact Checker dan Hub yang menilai gate.
+- Untuk tiap klaim fakta, cantumkan id klaim yang didukung di beat/narasi atau notes.
+
+Untuk `topic_candidates`, kirim JSON `{"candidates":[...]}` dan sertakan sekurangnya 10 kandidat dengan `topic_id`, judul kerja, keyakinan umum, kenyataan, claims, sources_awal, pillar, risk_flags, dan estimasi durasi. Jangan masukkan topik politik, keuangan, atau kesehatan.
+
+Jangan gunakan `send_task`; hanya CEO yang boleh mengirim tugas.

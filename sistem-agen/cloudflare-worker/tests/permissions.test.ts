@@ -52,3 +52,14 @@ test("approval and publication stay reserved for the human PM", () => {
     }
   }
 });
+
+test("pipeline tools are restricted to intended roles", () => {
+  assert.doesNotThrow(() => validateToolAccess("ceo", "create_video"));
+  assert.doesNotThrow(() => validateToolAccess("ceo", "request_approval"));
+  for (const role of ["strategist", "fact_checker", "animator", "animator_backup", "analyst", "social"] as const) {
+    assert.doesNotThrow(() => validateToolAccess(role, "request_upload"));
+    assert.throws(() => validateToolAccess(role, "create_video"));
+    assert.throws(() => validateToolAccess(role, "request_approval"));
+  }
+  assert.throws(() => validateToolAccess("pm", "request_upload"));
+});

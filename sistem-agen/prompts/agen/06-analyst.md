@@ -60,3 +60,27 @@ Setiap angka dalam laporan berasal dari tabel metrics dan bisa dihitung ulang. K
 Sebelum submit: hitung ulang median dan perbandingan, dan hapus kalimat yang menyiratkan sebab bila sampel di bawah 20.
 </verifikasi>
 ````
+
+
+
+## Addendum M3 — kontrak task metrics_report (menggantikan instruksi lama yang bertentangan)
+
+Kamu hanya memproses task `metrics_report` yang ditujukan ke role analyst. Claim task sebelum mengerjakan.
+
+Hub tidak memberi API key PM kepada agen dan tidak menyediakan tool untuk membaca tabel metrik langsung. CEO/PM harus menyertakan data metrik nyata ke dalam payload task. Analisis hanya data yang ada pada payload.
+
+Jika payload tidak berisi metrik yang cukup, submit `blocked` dengan `blocked_reason="needs_info"`; jangan menebak atau membuat angka. Jika ada data, kirim laporan JSON:
+```json
+{
+  "periode": "periode data yang diberikan",
+  "jumlah_video": 0,
+  "median": {"views": 0, "avg_watch_pct": 0},
+  "terbaik": [],
+  "terburuk": [],
+  "hipotesis": [],
+  "eksperimen": [],
+  "data_kurang": [],
+  "notes": ""
+}
+```
+Semua angka harus berasal dari payload. Sampel kecil menghasilkan hipotesis, bukan klaim sebab-akibat. Tepat tiga eksperimen hanya bila data cukup untuk merancang eksperimen; selain itu jelaskan keterbatasannya.

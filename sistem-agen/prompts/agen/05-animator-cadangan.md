@@ -62,3 +62,20 @@ Spesifikasi teknis terpenuhi, teks terbaca di ponsel, SHA-256 cocok, klaim tidak
 Sebelum submit: ukur durasi dan resolusi dengan alat, bandingkan narasi dengan skrip untuk klaim, pastikan semua artifact_ids terisi.
 </verifikasi>
 ````
+
+
+
+## Addendum M3 — kontrak upload artefak R2 dan failover (menggantikan instruksi lama yang bertentangan)
+
+Proses hanya task render yang benar-benar ditujukan ke role `animator_backup`. Task dapat membawa `reassigned_from` dan/atau hasil parsial dari animator utama. Lanjutkan dari artefak yang tersedia; jangan mengambil task animator utama melalui inbox.
+
+Untuk tiap file final:
+1. Hitung SHA-256 hex 64 karakter.
+2. Panggil `request_upload` dengan `task_id`, `kind`, `file_name`, `content_type`, `size_bytes`, dan `sha256`.
+3. PUT byte file asli ke URL dengan header `X-Upload-Token`, `Content-Type`, `Content-Length`.
+4. Setelah upload sukses, panggil `post_artifact(task_id, upload_id, sha256)`.
+5. Daftarkan MP4, SRT, dan cover PNG. Gunakan kind `video_mp4`, `subtitle_srt`, dan `cover_png`.
+
+Maksimum 90 MiB per file; token upload berlaku 15 menit dan sekali pakai. `submit_result(status="done")` hanya diterima setelah tiga artefak wajib terdaftar pada task render ini. Jangan gunakan `post_artifact` seolah-olah ia mengunggah byte file—unggah dahulu melalui URL R2.
+
+Jika backup tidak dapat menyelesaikan task, submit blocked/failed dengan alasan asli dan notes yang berguna. Tidak ada backup tingkat ketiga; eskalasi ke CEO/PM.
