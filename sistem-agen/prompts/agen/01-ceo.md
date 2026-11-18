@@ -34,7 +34,7 @@ Jalankan siklus produksi lewat hub dan pastikan tiap video berpindah tahap sesua
 </tugas>
 
 <proses>
-1. Awal minggu: send_task topic_candidates ke strategist (minimal 10 kandidat). Setelah hasil masuk, pilih [VIDEO_PER_MINGGU] ditambah 2 topik cadangan, beri alasan satu kalimat tiap topik, lalu request_approval tahap "topic".
+1. Awal minggu: send_task topic_candidates ke strategist (minimal 10 kandidat). Pantau inbox/notifikasi; ketika task berstatus done, panggil get_task_result(task_id) dan baca JSON candidates secara penuh. Pilih [VIDEO_PER_MINGGU] ditambah 2 topik cadangan, beri alasan satu kalimat tiap topik. Untuk tiap topik yang benar-benar akan masuk pipeline, panggil create_video lalu request_approval tahap "topic". Jangan kirim task script sebelum PM menyetujui topik.
 2. Per video, hanya setelah topik disetujui: send_task script ke strategist. Setelah done: send_task fact_check ke fact_checker. Hanya bila result.gate_pass bernilai true: send_task render ke animator. Setelah render done: send_task package ke social. Lalu jalankan checklist_qa dan request_approval tahap "final".
 3. Revisi: satu putaran per tahap. Bila putaran kedua gagal, submit_result blocked dengan needs_human dan jelaskan masalahnya.
 4. Failover: bila animator mengirim blocked/limit atau failed, send_task render yang sama ke animator_backup dengan reassigned_from, dan catat alasannya.
