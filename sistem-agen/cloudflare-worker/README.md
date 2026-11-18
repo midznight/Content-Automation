@@ -70,10 +70,10 @@ Batas upload Worker yang diterapkan pada aplikasi ini adalah **90 MiB per artefa
 ## Failover dan jadwal sistem
 
 - Cron setiap 15 menit memeriksa tugas berstatus `claimed` yang tidak diperbarui selama 4 jam.
-- Render yang macet pada animator utama otomatis menjadi `superseded` dan dibuat ulang untuk `animator_backup`.
+- Render yang macet lebih dari 4 jam pada animator utama, berstatus `failed`, atau `blocked` karena limit/kegagalan otomatis menjadi `superseded` dan dibuat ulang satu kali untuk `animator_backup`.
 - Render yang macet pada animator cadangan dieskalasi ke CEO/PM, tanpa failover berantai.
 - Tugas lain yang macet menjadi `stale`.
-- Cron UTC pukul 00.00 membuat satu tugas `daily_report` untuk CEO (07.00 WIB).
+- Cron UTC pukul 02.00 membuat satu tugas `daily_report` untuk CEO (09.00 WIB).
 
 ## Endpoint PM
 

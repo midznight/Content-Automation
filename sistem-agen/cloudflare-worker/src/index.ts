@@ -1246,53 +1246,112 @@ async function telegramWebhook(request: Request, env: Env): Promise<Response> {
   return jsonResponse({ ok: result.ok, error: result.error });
 }
 async function runStaleTaskSweep(env: Env): Promise<void> {
+  const backup = await env.DB.prepare(
+    "SELECT id FROM agents WHERE role = 'animator_backup' AND active = 1 LIMIT 1",
+  ).first<{ id: string }>();
   const cutoff = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
-  const rows = await env.DB.prepare(
+  const claimed = await env.DB.prepare(
     "SELECT id, parent_id, type, video_id, to_agent, title, payload, priority, attempt, due_at, updated_at " +
       "FROM tasks WHERE status = 'claimed' AND updated_at <= ? ORDER BY updated_at LIMIT 100",
   ).bind(cutoff).all<{
     id: string; parent_id: string | null; type: string; video_id: string | null; to_agent: string;
     title: string; payload: string; priority: string; attempt: number; due_at: string | null; updated_at: string;
   }>();
-  for (const task of rows.results ?? []) {
+
+  for (const task of claimed.results ?? []) {
     const timestamp = nowIso();
-    if (task.type === "render" && task.to_agent === "animator") {
-      const replacementId = newId("tsk_");
-      const batch = await env.DB.batch([
-        env.DB.prepare("UPDATE tasks SET status = 'superseded', updated_at = ? WHERE id = ? AND status = 'claimed' AND updated_at = ?")
-          .bind(timestamp, task.id, task.updated_at),
-        env.DB.prepare(
-          "INSERT INTO events (ts, actor, action, task_id, video_id, detail) " +
-          "SELECT ?, 'system', 'task_status_superseded', id, video_id, ? FROM tasks " +
-          "WHERE id = ? AND status = 'superseded' AND updated_at = ? AND changes() = 1",
-        ).bind(timestamp, JSON.stringify({ previous_status: "claimed", new_status: "superseded", previous_owner: "animator", failover: "animator_backup" }), task.id, timestamp),
-        env.DB.prepare(
-          "INSERT INTO tasks (id, parent_id, video_id, type, title, payload, priority, from_agent, to_agent, status, attempt, reassigned_from, created_at, updated_at, due_at) " +
-          "SELECT ?, ?, video_id, type, title || ' [FAILOVER]', payload, priority, 'system', 'animator_backup', 'queued', attempt + 1, id, ?, ?, due_at " +
-          "FROM tasks WHERE id = ? AND status = 'superseded' AND updated_at = ? AND changes() = 1",
-        ).bind(replacementId, task.parent_id ?? task.id, timestamp, timestamp, task.id, timestamp),
-        env.DB.prepare(
-          "INSERT INTO events (ts, actor, action, task_id, video_id, detail) " +
-          "SELECT ?, 'system', 'task_failover_queued', id, video_id, ? FROM tasks WHERE id = ? AND status = 'queued'",
-        ).bind(timestamp, JSON.stringify({ previous_task_id: task.id, from_role: "animator", to_role: "animator_backup", reason: "stale_after_4h" }), replacementId),
-      ]);
-      if ((batch[0]?.meta?.changes ?? 0) === 1 && (batch[2]?.meta?.changes ?? 0) === 1) {
-        await notifyPM(env, "Failover render otomatis: tugas " + task.id + " milik animator utama telah melewati 4 jam tanpa pembaruan. Tugas pengganti " + replacementId + " masuk ke antrean animator_backup.");
-      }
+    if (task.type === "render" && task.to_agent === "animator" && backup) {
+      await queueAnimatorFailover(env, task, "stale_after_4h", timestamp);
       continue;
     }
-
     const action = task.type === "render" ? "needs_reassign" : "task_stale";
     const batch = await env.DB.batch([
-      env.DB.prepare("UPDATE tasks SET status = 'stale', updated_at = ? WHERE id = ? AND status = 'claimed' AND updated_at = ?").bind(timestamp, task.id, task.updated_at),
-      env.DB.prepare("INSERT INTO events (ts, actor, action, task_id, video_id, detail) SELECT ?, 'system', 'task_status_stale', id, video_id, ? FROM tasks WHERE id = ? AND status = 'stale' AND updated_at = ? AND changes() = 1")
-        .bind(timestamp, JSON.stringify({ previous_status: "claimed", new_status: "stale", previous_owner: task.to_agent }), task.id, timestamp),
-      env.DB.prepare("INSERT INTO events (ts, actor, action, task_id, video_id, detail) SELECT ?, 'system', ?, id, video_id, ? FROM tasks WHERE id = ? AND status = 'stale' AND updated_at = ? AND changes() = 1")
-        .bind(timestamp, action, JSON.stringify({ task_type: task.type, previous_owner: task.to_agent, escalation: task.type === "render" ? "ceo_review" : "pm_review" }), task.id, timestamp),
+      env.DB.prepare("UPDATE tasks SET status = 'stale', updated_at = ? WHERE id = ? AND status = 'claimed' AND updated_at = ?")
+        .bind(timestamp, task.id, task.updated_at),
+      env.DB.prepare(
+        "INSERT INTO events (ts, actor, action, task_id, video_id, detail) " +
+          "SELECT ?, 'system', 'task_status_stale', id, video_id, ? FROM tasks " +
+          "WHERE id = ? AND status = 'stale' AND updated_at = ? AND changes() = 1",
+      ).bind(timestamp, JSON.stringify({ previous_status: "claimed", new_status: "stale", previous_owner: task.to_agent }), task.id, timestamp),
+      env.DB.prepare(
+        "INSERT INTO events (ts, actor, action, task_id, video_id, detail) " +
+          "SELECT ?, 'system', ?, id, video_id, ? FROM tasks WHERE id = ? AND status = 'stale' AND updated_at = ? AND changes() = 1",
+      ).bind(timestamp, action, JSON.stringify({ task_type: task.type, previous_owner: task.to_agent, escalation: task.type === "render" ? "ceo_review" : "pm_review" }), task.id, timestamp),
     ]);
     if ((batch[0]?.meta?.changes ?? 0) === 1) {
-      await notifyPM(env, "Tugas " + task.id + " menjadi stale setelah lebih dari 4 jam. Pemilik: " + task.to_agent + (task.type === "render" ? ". Animator cadangan tidak melakukan progres; CEO/PM perlu meninjau." : "."));
+      await notifyPM(env, "Tugas " + task.id + " menjadi stale setelah lebih dari 4 jam. Pemilik: " + task.to_agent +
+        (task.type === "render" ? (backup ? ". CEO/PM perlu meninjau." : ". Animator cadangan tidak aktif; perlu intervensi PM.") : "."));
     }
+  }
+
+  // Explicit render failures and capacity blocks are failed over on the next 15-minute sweep.
+  if (backup) {
+    const failed = await env.DB.prepare(
+      "SELECT id, parent_id, video_id, title, payload, priority, attempt, due_at, status, blocked_reason " +
+        "FROM tasks t WHERE t.type = 'render' AND t.to_agent = 'animator' " +
+        "AND (t.status = 'failed' OR (t.status = 'blocked' AND t.blocked_reason IN ('limit', 'failed'))) " +
+        "AND NOT EXISTS (SELECT 1 FROM tasks replacement WHERE replacement.reassigned_from = t.id) " +
+        "ORDER BY t.updated_at LIMIT 100",
+    ).all<{
+      id: string; parent_id: string | null; video_id: string | null; title: string; payload: string;
+      priority: string; attempt: number; due_at: string | null; status: string; blocked_reason: string | null;
+    }>();
+    for (const task of failed.results ?? []) {
+      await queueAnimatorFailover(env, task, task.status === "failed" ? "render_failed" : "render_capacity_or_failure");
+    }
+  }
+}
+
+async function queueAnimatorFailover(
+  env: Env,
+  task: {
+    id: string; parent_id: string | null; video_id: string | null; title: string; payload: string;
+    priority: string; attempt: number; due_at: string | null; status?: string; updated_at?: string;
+  },
+  reason: string,
+  timestamp = nowIso(),
+): Promise<void> {
+  const replacementId = newId("tsk_");
+  const previousStatus = task.status ?? "claimed";
+  const update = previousStatus === "claimed"
+    ? env.DB.prepare(
+        "UPDATE tasks SET status = 'superseded', updated_at = ? WHERE id = ? AND status = 'claimed' AND updated_at = ?",
+      ).bind(timestamp, task.id, task.updated_at)
+    : env.DB.prepare(
+        "UPDATE tasks SET status = 'superseded', updated_at = ? WHERE id = ? AND status = ? " +
+          "AND NOT EXISTS (SELECT 1 FROM tasks replacement WHERE replacement.reassigned_from = tasks.id)",
+      ).bind(timestamp, task.id, previousStatus);
+  const batch = await env.DB.batch([
+    update,
+    env.DB.prepare(
+      "INSERT INTO events (ts, actor, action, task_id, video_id, detail) " +
+        "SELECT ?, 'system', 'task_status_superseded', id, video_id, ? FROM tasks " +
+        "WHERE id = ? AND status = 'superseded' AND updated_at = ? AND changes() = 1",
+    ).bind(timestamp, JSON.stringify({
+      previous_status: previousStatus,
+      new_status: "superseded",
+      previous_owner: "animator",
+      failover: "animator_backup",
+      reason,
+    }), task.id, timestamp),
+    env.DB.prepare(
+      "INSERT INTO tasks (id, parent_id, video_id, type, title, payload, priority, from_agent, to_agent, status, attempt, reassigned_from, created_at, updated_at, due_at) " +
+        "SELECT ?, ?, video_id, type, title || ' [FAILOVER]', payload, priority, 'system', 'animator_backup', 'queued', attempt + 1, id, ?, ?, due_at " +
+        "FROM tasks WHERE id = ? AND status = 'superseded' AND updated_at = ? AND changes() = 1",
+    ).bind(replacementId, task.parent_id ?? task.id, timestamp, timestamp, task.id, timestamp),
+    env.DB.prepare(
+      "INSERT INTO events (ts, actor, action, task_id, video_id, detail) " +
+        "SELECT ?, 'system', 'task_failover_queued', id, video_id, ? FROM tasks WHERE id = ? AND status = 'queued'",
+    ).bind(timestamp, JSON.stringify({
+      previous_task_id: task.id,
+      from_role: "animator",
+      to_role: "animator_backup",
+      reason,
+    }), replacementId),
+  ]);
+  if ((batch[0]?.meta?.changes ?? 0) === 1 && (batch[2]?.meta?.changes ?? 0) === 1) {
+    await notifyPM(env, "Failover render otomatis: " + task.id + " dialihkan ke " + replacementId +
+      " pada animator_backup. Alasan: " + reason + ".");
   }
 }
 async function createDailyCEOReportTask(env: Env): Promise<void> {
@@ -1308,7 +1367,7 @@ async function createDailyCEOReportTask(env: Env): Promise<void> {
 export default {
   async scheduled(controller: { cron: string }, env: Env, ctx: { waitUntil(promise: Promise<unknown>): void }) {
     if (controller.cron === "*/15 * * * *") ctx.waitUntil(runStaleTaskSweep(env));
-    if (controller.cron === "0 0 * * *") ctx.waitUntil(createDailyCEOReportTask(env));
+    if (controller.cron === "0 2 * * *") ctx.waitUntil(createDailyCEOReportTask(env));
   },
   async fetch(request: Request, env: Env, ctx: { waitUntil(promise: Promise<unknown>): void }) {
     const url = new URL(request.url);

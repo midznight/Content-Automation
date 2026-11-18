@@ -45,3 +45,8 @@ test("package result requires caption, hashtags and cover text", () => {
   assert.deepEqual(validatePackageResult({ caption: "Caption", hashtags: ["#fakta"], cover_text: "Tahu gak?" }), []);
   assert.ok(validatePackageResult({ caption: "", hashtags: [], cover_text: "" }).length >= 3);
 });
+
+
+test("script duration must be a numeric integer, not a numeric string", () => {
+  assert.ok(validateScriptResult({ ...script, durasi_detik: "42" }).some((error) => error.includes("angka bulat")));
+});

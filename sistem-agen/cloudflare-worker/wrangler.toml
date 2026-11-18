@@ -10,6 +10,17 @@ enabled = true
 [observability.logs]
 enabled = true
 invocation_logs = true
+persist = true
+head_sampling_rate = 1.0
+
+[observability.traces]
+enabled = true
+persist = true
+head_sampling_rate = 0.1
+
+[observability.logs]
+enabled = true
+invocation_logs = true
 
 [observability.traces]
 enabled = true
@@ -24,4 +35,4 @@ binding = "ARTIFACTS"
 bucket_name = "content-automation-artifacts-prod"
 
 [triggers]
-crons = ["*/15 * * * *", "0 0 * * *"]
+crons = ["*/15 * * * *", "0 2 * * *"]
