@@ -1781,7 +1781,9 @@ async function queueAnimatorFailover(
     await notifyPM(env, "Failover render otomatis: " + task.id + " dialihkan ke " + replacementId +
       " pada animator_backup. Alasan: " + reason + ".");
   }
-}async function createDailyCEOReportTask(env: Env): Promise<void> {
+}
+
+async function createDailyCEOReportTask(env: Env): Promise<void> {
   const today = new Date().toISOString().slice(0, 10);
   const exists = await env.DB.prepare("SELECT id FROM tasks WHERE type = 'daily_report' AND created_at LIKE ? LIMIT 1").bind(today + "%").first<{ id: string }>();
   if (exists) return;
