@@ -217,9 +217,19 @@ async function decideApproval(env: Env, approvalId: string, decision: "approve" 
   const timestamp = nowIso();
   const action = approval.stage + "_approval_" + (decision === "approve" ? "approved" : "rejected");
   const batch = await env.DB.batch([
-    env.DB.prepare("UPDATE approvals SET decision = ?, decided_at = ?, decided_by = ?, note = ? WHERE id = ? AND decision IS NULL").bind(decision, timestamp, actor, note || null, approvalId),
-    env.DB.prepare("UPDATE videos SET stage = ?, updated_at = ? WHERE id = ? AND stage = ?").bind(nextStage, timestamp, approval.video_id, video.stage),
-    env.DB.prepare("INSERT INTO events (ts, actor, action, video_id, detail) VALUES (?, ?, ?, ?, ?)").bind(timestamp, actor, action, approval.video_id, JSON.stringify({ approval_id: approvalId, stage: approval.stage, decision, note })),
+    env.DB.prepare(
+      "UPDATE approvals SET decision = ?, decided_at = ?, decided_by = ?, note = ? " +
+        "WHERE id = ? AND decision IS NULL AND EXISTS (SELECT 1 FROM videos WHERE id = approvals.video_id AND stage = ?)",
+    ).bind(decision, timestamp, actor, note || null, approvalId, expectedVideoStage),
+    env.DB.prepare(
+      "UPDATE videos SET stage = ?, updated_at = ? WHERE id = ? AND stage = ? " +
+        "AND EXISTS (SELECT 1 FROM approvals WHERE id = ? AND decision = ? AND decided_at = ?)",
+    ).bind(nextStage, timestamp, approval.video_id, expectedVideoStage, approvalId, decision, timestamp),
+    env.DB.prepare(
+      "INSERT INTO events (ts, actor, action, video_id, detail) " +
+        "SELECT ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM approvals WHERE id = ? AND decision = ? AND decided_at = ?) " +
+        "AND EXISTS (SELECT 1 FROM videos WHERE id = ? AND stage = ?)",
+    ).bind(timestamp, actor, action, approval.video_id, JSON.stringify({ approval_id: approvalId, stage: approval.stage, decision, note }), approvalId, decision, timestamp, approval.video_id, nextStage),
   ]);
   if ((batch[0]?.meta?.changes ?? 0) !== 1 || (batch[1]?.meta?.changes ?? 0) !== 1) return { ok: false, error: "Status persetujuan berubah saat diproses. Muat ulang daftar persetujuan." };
   await notifyPM(env, "Persetujuan " + approvalId + " untuk video " + approval.video_id + ": " + decision.toUpperCase() + "\nTahap video sekarang: " + nextStage + (note ? "\nCatatan: " + note : ""));
@@ -465,8 +475,10 @@ function createServer(agent: AuthenticatedAgent, env: Env, origin: string): McpS
 
       let normalizedResult: Record<string, unknown> = result ?? {};
       let nextVideoStage: string | null = null;
+      let expectedVideoStage: string | null = null;
       let gateReasons: string[] = [];
       if (status === "done" && task.type === "script") {
+        expectedVideoStage = "topic_approved";
         const errors = validateScriptResult(normalizedResult);
         if (errors.length) return toolError("Skrip belum lengkap: " + errors.join(" "));
         nextVideoStage = "scripted";
@@ -476,18 +488,23 @@ function createServer(agent: AuthenticatedAgent, env: Env, origin: string): McpS
         const evaluation = evaluateFactCheckGate(parseJson(scriptTask?.result, null), normalizedResult);
         gateReasons = evaluation.reasons;
         normalizedResult = { ...normalizedResult, gate_pass: evaluation.gatePass, gate_reasons: evaluation.reasons, verified_core_claims: evaluation.verifiedCoreClaims, total_core_claims: evaluation.totalCoreClaims };
-        if (evaluation.gatePass) nextVideoStage = "fact_checked";
+        if (evaluation.gatePass) {
+          expectedVideoStage = "scripted";
+          nextVideoStage = "fact_checked";
+        }
       }
       if (status === "done" && task.type === "render") {
         const artifactRows = await db.prepare("SELECT kind FROM artifacts WHERE task_id = ?").bind(task_id).all<{ kind: string }>();
         const kinds = new Set((artifactRows.results ?? []).map((row) => row.kind));
         const missing = ["video_mp4", "subtitle_srt", "cover_png"].filter((kind) => !kinds.has(kind));
         if (missing.length) return toolError("Render belum dapat ditandai selesai. Artefak wajib belum terdaftar: " + missing.join(", ") + ".");
+        expectedVideoStage = "fact_checked";
         nextVideoStage = "animated";
       }
       if (status === "done" && task.type === "package") {
         const errors = validatePackageResult(normalizedResult);
         if (errors.length) return toolError("Paket social belum lengkap: " + errors.join(" "));
+        expectedVideoStage = "animated";
         nextVideoStage = "packaged";
       }
       const updatedAt = nowIso();
@@ -498,20 +515,18 @@ function createServer(agent: AuthenticatedAgent, env: Env, origin: string): McpS
           ? "needs_reassign"
           : "result_ready";
 
-      const batch = await db.batch([
-        db
-          .prepare(
+      const taskUpdate = expectedVideoStage && task.video_id
+        ? db.prepare(
+            "UPDATE tasks SET status = ?, result = ?, blocked_reason = ?, updated_at = ? " +
+              "WHERE id = ? AND status = 'claimed' AND to_agent = ? " +
+              "AND EXISTS (SELECT 1 FROM videos WHERE id = ? AND stage = ?)",
+          ).bind(status, JSON.stringify(normalizedResult), blocked_reason ?? null, updatedAt, task_id, agent.role, task.video_id, expectedVideoStage)
+        : db.prepare(
             "UPDATE tasks SET status = ?, result = ?, blocked_reason = ?, updated_at = ? " +
               "WHERE id = ? AND status = 'claimed' AND to_agent = ?",
-          )
-          .bind(
-            status,
-            JSON.stringify(normalizedResult),
-            blocked_reason ?? null,
-            updatedAt,
-            task_id,
-            agent.role,
-          ),
+          ).bind(status, JSON.stringify(normalizedResult), blocked_reason ?? null, updatedAt, task_id, agent.role);
+      const statements: D1PreparedStatement[] = [
+        taskUpdate,
         db
           .prepare(
             "INSERT INTO events (ts, actor, action, task_id, video_id, detail) " +
@@ -551,16 +566,24 @@ function createServer(agent: AuthenticatedAgent, env: Env, origin: string): McpS
             status,
             updatedAt,
           ),
-      ]);
+      ];
+      if (nextVideoStage && task.video_id && expectedVideoStage) {
+        statements.push(
+          db.prepare("UPDATE videos SET stage = ?, updated_at = ? WHERE id = ? AND stage = ?")
+            .bind(nextVideoStage, updatedAt, task.video_id, expectedVideoStage),
+          db.prepare(
+            "INSERT INTO events (ts, actor, action, video_id, detail) " +
+              "SELECT ?, ?, 'video_stage_changed', ?, ? WHERE changes() = 1",
+          ).bind(updatedAt, agent.name, task.video_id, JSON.stringify({ from_task: task_id, new_stage: nextVideoStage })),
+        );
+      }
+      const batch = await db.batch(statements);
 
       if ((batch[0]?.meta?.changes ?? 0) !== 1) {
-        return toolError("Tugas sudah berubah status. Muat ulang daftar tugas sebelum mengirim hasil.");
+        return toolError("Tugas atau tahap video sudah berubah. Muat ulang sebelum mengirim hasil.");
       }
-
-      if (nextVideoStage && task.video_id) {
-        await db.prepare("UPDATE videos SET stage = ?, updated_at = ? WHERE id = ?").bind(nextVideoStage, updatedAt, task.video_id).run();
-        await db.prepare("INSERT INTO events (ts, actor, action, video_id, detail) VALUES (?, ?, 'video_stage_changed', ?, ?)")
-          .bind(updatedAt, agent.name, task.video_id, JSON.stringify({ from_task: task_id, new_stage: nextVideoStage })).run();
+      if (nextVideoStage && (batch[3]?.meta?.changes ?? 0) !== 1) {
+        return toolError("Tugas tercatat, tetapi tahap video tidak dapat diperbarui. Hub perlu diperiksa.");
       }
       if (task.type === "fact_check" && status === "done" && !nextVideoStage) await notifyPM(env, "Fact-check belum lolos untuk video " + task.video_id + ". " + gateReasons.join(" "));
       return textResult({
@@ -882,11 +905,23 @@ function createServer(agent: AuthenticatedAgent, env: Env, origin: string): McpS
     if (pending) return toolError("Masih ada permintaan persetujuan yang menunggu untuk tahap ini.");
     const approvalId = newId("apv_"); const timestamp = nowIso();
     const nextStage = stage === "topic" ? "awaiting_topic_approval" : "awaiting_approval";
-    await db.batch([
-      db.prepare("INSERT INTO approvals (id, video_id, stage, requested_at, summary, requested_by) VALUES (?, ?, ?, ?, ?, ?)").bind(approvalId, video_id, stage, timestamp, summary, agent.name),
-      db.prepare("UPDATE videos SET stage = ?, updated_at = ? WHERE id = ? AND stage = ?").bind(nextStage, timestamp, video_id, video.stage),
-      db.prepare("INSERT INTO events (ts, actor, action, video_id, detail) VALUES (?, ?, 'approval_requested', ?, ?)").bind(timestamp, agent.name, video_id, JSON.stringify({ approval_id: approvalId, stage, summary })),
+    const approvalBatch = await db.batch([
+      db.prepare(
+        "UPDATE videos SET stage = ?, updated_at = ? WHERE id = ? AND stage = ? " +
+          "AND NOT EXISTS (SELECT 1 FROM approvals WHERE video_id = ? AND stage = ? AND decision IS NULL)",
+      ).bind(nextStage, timestamp, video_id, video.stage, video_id, stage),
+      db.prepare(
+        "INSERT INTO approvals (id, video_id, stage, requested_at, summary, requested_by) " +
+          "SELECT ?, ?, ?, ?, ?, ? WHERE changes() = 1",
+      ).bind(approvalId, video_id, stage, timestamp, summary, agent.name),
+      db.prepare(
+        "INSERT INTO events (ts, actor, action, video_id, detail) " +
+          "SELECT ?, ?, 'approval_requested', ?, ? WHERE changes() = 1",
+      ).bind(timestamp, agent.name, video_id, JSON.stringify({ approval_id: approvalId, stage, summary })),
     ]);
+    if ((approvalBatch[0]?.meta?.changes ?? 0) !== 1 || (approvalBatch[1]?.meta?.changes ?? 0) !== 1) {
+      return toolError("Permintaan persetujuan berubah atau sudah dibuat oleh eksekusi lain. Muat ulang status video.");
+    }
     const keyboard = { inline_keyboard: [[{ text: "Setujui", callback_data: "approve:" + approvalId }, { text: "Tolak", callback_data: "reject:" + approvalId }]] };
     await notifyPM(env, "Permintaan persetujuan " + stage + " untuk video " + video_id + "\n" + video.topic + "\n\n" + summary, keyboard);
     return textResult({ approval_id: approvalId, video_id, stage, status: "pending", next_video_stage: nextStage, message: "Menunggu keputusan PM melalui /pm/approvals atau Telegram jika webhook dikonfigurasi." });
