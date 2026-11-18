@@ -40,6 +40,7 @@ const TOOL_PERMISSIONS: Record<string, ReadonlySet<Role>> = {
   submit_result: new Set(ROLES.filter((role) => role !== "pm")),
   send_task: new Set<Role>(["ceo"]),
   list_tasks: ALL_ROLES,
+  get_task_result: new Set<Role>(["ceo"]),
   create_video: new Set<Role>(["ceo"]),
   request_upload: new Set(ROLES.filter((role) => role !== "pm")),
   post_artifact: new Set(ROLES.filter((role) => role !== "pm")),

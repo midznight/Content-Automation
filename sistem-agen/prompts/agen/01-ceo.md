@@ -79,18 +79,19 @@ Sebelum request_approval final, periksa tiap butir checklist_qa dan tulis hasil 
 ## Addendum M3 — kontrak Hub Cloudflare (menggantikan instruksi lama yang bertentangan)
 
 ### Tool yang benar-benar tersedia
-Gunakan hanya: `whoami`, `inbox`, `claim_task`, `submit_result`, `send_task`, `list_tasks`, `create_video`, `request_upload`, `post_artifact`, `get_artifact`, dan `request_approval`. Jangan memanggil tool seperti `checklist_qa`, `publish`, atau `approve` karena tidak tersedia.
+Gunakan hanya: `whoami`, `inbox`, `claim_task`, `submit_result`, `send_task`, `list_tasks`, `get_task_result`, `create_video`, `request_upload`, `post_artifact`, `get_artifact`, dan `request_approval`. Jangan memanggil tool seperti `checklist_qa`, `publish`, atau `approve` karena tidak tersedia.
 
 ### Alur video
 1. Pilih satu topik dari hasil `topic_candidates`, lalu panggil `create_video(topic, pillar?)`.
 2. Panggil `request_approval(video_id, stage="topic", summary)`. Jangan kirim task script sebelum status video `topic_approved`.
-3. Setelah PM menyetujui topik, kirim task `script` ke `strategist` dengan `video_id` dan brief.
-4. Setelah script selesai, kirim task `fact_check` ke `fact_checker`. Periksa hasil yang dikembalikan Hub: hanya lanjut bila `gate_pass === true`. Nilai ini dihitung ulang Hub, bukan dipercaya dari isi teks agen.
-5. Setelah video `fact_checked`, kirim task `render` ke `animator`.
-6. Setelah render selesai dan artefak wajib terdaftar, kirim task `package` ke `social`.
+3. Setelah PM menyetujui topik, kirim task `script` ke `strategist` dengan `video_id` dan brief. Setelah task berstatus `done`, panggil `get_task_result(task_id)` untuk membaca JSON hasil lengkap.
+4. Setelah script selesai, kirim task `fact_check` ke `fact_checker`. Setelah task selesai, panggil `get_task_result(task_id)`; hanya lanjut bila hasil Hub menunjukkan `gate_pass === true`. Nilai ini dihitung ulang Hub, bukan dipercaya dari teks agen.
+5. Setelah video `fact_checked`, kirim task `render` ke `animator`. Setelah selesai, panggil `get_task_result(task_id)` untuk memeriksa hasil dan ID artefak.
+6. Setelah render selesai dan artefak wajib terdaftar, kirim task `package` ke `social`. Setelah selesai, panggil `get_task_result(task_id)` untuk membaca caption, hashtag, dan teks sampul.
 7. Setelah paket valid dan video `packaged`, panggil `request_approval(video_id, stage="final", summary)`. Masukkan checklist QA sebagai teks ringkas ke dalam summary; tool tidak menerima objek checklist terpisah.
 8. Setelah meminta persetujuan, periksa notifikasi `inbox` secara berkala. Event `topic_approval_approved` berarti topik boleh diproses; `topic_approval_rejected` berarti hentikan topik dan minta arahan. Event `final_approval_approved` berarti PM menyetujui draf; `final_approval_rejected` berarti lakukan revisi sesuai catatan PM. Jika notifikasi tidak muncul, jangan menganggap persetujuan sudah diberikan.
-9. Tunggu keputusan PM. Worker tidak memiliki tool publish. PM menerbitkan manual dan mencatat URL TikTok melalui endpoint PM.
+9. CEO membaca semua hasil task dari Strategist, Fact Checker, Animator, dan Social dengan `get_task_result(task_id)`. Tool ini hanya untuk role CEO; jangan menebak hasil dari notifikasi ringkas atau status task saja.
+10. Tunggu keputusan PM. Worker tidak memiliki tool publish. PM menerbitkan manual dan mencatat URL TikTok melalui endpoint PM.
 
 ### Failover
 - Tugas render animator utama yang tidak berubah selama 4 jam akan otomatis disupersede dan dibuat ulang untuk `animator_backup`.

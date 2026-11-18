@@ -63,3 +63,10 @@ test("pipeline tools are restricted to intended roles", () => {
   }
   assert.throws(() => validateToolAccess("pm", "request_upload"));
 });
+
+test("only CEO can read task results across agents", () => {
+  assert.doesNotThrow(() => validateToolAccess("ceo", "get_task_result"));
+  for (const role of ROLES.filter((role) => role !== "ceo")) {
+    assert.throws(() => validateToolAccess(role, "get_task_result"));
+  }
+});

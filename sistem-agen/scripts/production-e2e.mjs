@@ -122,7 +122,7 @@ try {
 
   const listed = await rpc("tools/list", {});
   const tools = listed.result?.tools || [];
-  for (const required of ["whoami", "create_video", "request_approval"]) {
+  for (const required of ["whoami", "create_video", "request_approval", "get_task_result"]) {
     if (!tools.some((tool) => tool.name === required)) throw new Error("MCP tool missing: " + required);
   }
 
@@ -145,6 +145,20 @@ try {
   }), "request_approval");
   if (approval.status !== "pending" || approval.next_video_stage !== "awaiting_topic_approval") throw new Error("Topic approval did not enter the pending state.");
 
+  const resultTaskId = "tsk_e2e_result_" + runId;
+  const expectedTaskResult = { marker: "E2E_RESULT_READBACK", candidates: [{ topic_id: "qa-only" }] };
+  await d1(
+    "INSERT INTO tasks (id, video_id, type, title, payload, priority, from_agent, to_agent, status, result, attempt, created_at, updated_at) VALUES (?, ?, 'topic_candidates', 'E2E result readback', '{}', 'normal', 'ceo', 'strategist', 'done', ?, 1, ?, ?)",
+    [resultTaskId, created.video_id, JSON.stringify(expectedTaskResult), new Date().toISOString(), new Date().toISOString()],
+  );
+  const fetchedTask = toolData(await rpc("tools/call", {
+    name: "get_task_result",
+    arguments: { task_id: resultTaskId },
+  }), "get_task_result");
+  if (fetchedTask.status !== "done" || fetchedTask.result?.marker !== "E2E_RESULT_READBACK") {
+    throw new Error("CEO could not read the completed worker task result.");
+  }
+
   const videoRows = (await d1("SELECT stage FROM videos WHERE id = ?", [created.video_id])).results || [];
   const approvalRows = (await d1("SELECT decision FROM approvals WHERE id = ? AND video_id = ?", [approval.approval_id, created.video_id])).results || [];
   if (videoRows.length !== 1 || videoRows[0].stage !== "awaiting_topic_approval" || approvalRows.length !== 1 || approvalRows[0].decision !== null) {
@@ -155,6 +169,7 @@ try {
   console.log("PASS: unauthenticated PM endpoint rejects requests with HTTP 401.");
   console.log("PASS: MCP initialize, tools/list, and CEO whoami.");
   console.log("PASS: create_video and request_approval persisted to D1.");
+  console.log("PASS: CEO can read completed worker JSON task results.");
 } catch (error) {
   failed = true;
   console.error("PRODUCTION E2E FAILED: " + (error instanceof Error ? error.message : "unknown error"));
