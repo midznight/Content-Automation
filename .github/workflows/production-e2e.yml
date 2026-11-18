@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "sistem-agen/scripts/production-e2e.mjs"
+      - "sistem-agen/cloudflare-worker/src/**"
       - ".github/workflows/production-e2e.yml"
   workflow_dispatch:
 

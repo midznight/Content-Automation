@@ -796,6 +796,33 @@ function createServer(agent: AuthenticatedAgent, env: Env, origin: string): McpS
     },
   );
 
+  server.registerTool("get_task_result", {
+    description: "Mengambil status, payload, dan hasil JSON sebuah task. Hanya CEO yang dapat membaca hasil lintas agen.",
+    inputSchema: { task_id: z.string().min(1).max(64) },
+  }, async ({ task_id }) => {
+    validateToolAccess(agent.role, "get_task_result");
+    const task = await db.prepare(
+      "SELECT id, video_id, type, title, payload, from_agent, to_agent, status, blocked_reason, result, attempt, created_at, updated_at " +
+        "FROM tasks WHERE id = ? LIMIT 1",
+    ).bind(task_id).first<TaskRow>();
+    if (!task) return toolError("Tugas dengan ID '" + task_id + "' tidak ditemukan.");
+    return textResult({
+      task_id: task.id,
+      video_id: task.video_id,
+      type: task.type,
+      title: task.title,
+      from: task.from_agent,
+      to: task.to_agent,
+      status: task.status,
+      blocked_reason: task.blocked_reason,
+      attempt: task.attempt,
+      created_at: task.created_at,
+      updated_at: task.updated_at,
+      payload: parseJson(task.payload, {}),
+      result: parseJson(task.result, null),
+    });
+  });
+
   server.registerTool("create_video", {
     description: "Membuat entri produksi video baru setelah CEO memilih topik.",
     inputSchema: { topic: z.string().min(5).max(255), pillar: z.string().max(80).optional() },

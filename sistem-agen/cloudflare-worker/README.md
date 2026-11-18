@@ -15,7 +15,7 @@ Backend cloud untuk proyek **Content-Automation**. Repositori, Worker, D1, R2, k
 - Persetujuan PM: secret terpisah `PM_TOKEN`
 - Audit: tabel `events` append-only
 
-Bucket R2 telah dibuat. Binding, migration M3, dan tool M3 berada pada branch `feat/m3-production-pipeline` sampai PR ditinjau dan digabung.
+M3 telah digabung ke `main` dan dideploy ke Worker produksi. Binding D1/R2, migration M3, dan secret `PM_TOKEN` sudah aktif.
 
 ## Tool MCP
 
