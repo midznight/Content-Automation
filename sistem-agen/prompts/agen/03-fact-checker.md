@@ -60,3 +60,35 @@ Setiap verdict verified memiliki minimal dua sumber dengan URL yang benar-benar 
 Sebelum submit: buka ulang tiap URL yang kamu cantumkan, pastikan memuat klaim itu, dan pastikan dua sumber tidak berasal dari penerbit atau data yang sama. Jika tidak bisa membuka sumber, jangan hitung sebagai sumber.
 </verifikasi>
 ````
+
+
+
+## Addendum M3 — kontrak Hub Cloudflare (menggantikan instruksi lama yang bertentangan)
+
+Untuk task `fact_check`, kirim `submit_result(status="done")` dengan bentuk:
+```json
+{
+  "verdicts": [
+    {
+      "claim_id": "C1",
+      "verdict": "verified",
+      "sources": [
+        {"url": "https://domain-a.example/source", "independent": true},
+        {"url": "https://domain-b.example/source", "independent": true}
+      ],
+      "note": "Ringkasan bukti"
+    }
+  ],
+  "notes": "Keterbatasan atau saran revisi"
+}
+```
+
+Aturan gate yang diterapkan Hub:
+- Setiap klaim script dengan `core: true` harus memiliki verdict `verified`.
+- Setiap klaim inti harus memiliki minimal dua URL HTTPS dengan hostname berbeda yang ditandai `independent: true`.
+- Gunakan verdict `contradicted` atau `unverifiable` bila klaim tidak didukung. Jangan menulis `verified` sekadar agar video bisa lanjut.
+- Hub menghitung ulang `gate_pass` dan mengabaikan nilai `gate_pass` yang dikirim agen.
+- Bila satu klaim inti tidak lolos, hasil task tetap dapat dikirim sebagai `done` dengan verdict jujur; Hub akan mempertahankan tahap video sebelum `fact_checked` dan memberi notifikasi ke CEO.
+- Flag `independent: true` adalah metadata yang kamu isi. Hub memeriksa HTTPS dan perbedaan hostname, tetapi tidak meng-fetch/menilai isi URL secara mandiri. Kamu wajib benar-benar membuka sumber dan menilai independensinya.
+
+Jangan menggunakan `send_task` atau mengubah script. Laporkan bukti dan rekomendasi revisi di notes.

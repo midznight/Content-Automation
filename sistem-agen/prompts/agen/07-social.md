@@ -60,3 +60,29 @@ Caption diawali kata kunci utama, 3 sampai 5 hashtag, setiap klaim pada caption 
 Sebelum submit: bandingkan tiap klaim di caption dengan daftar klaim verified. Hapus yang tidak ada di sana.
 </verifikasi>
 ````
+
+
+
+## Addendum M3 — kontrak hasil package (menggantikan instruksi lama yang bertentangan)
+
+Task `package` diproses setelah video berada pada tahap `animated`. Baca skrip, fact-check, dan artefak yang diberikan di payload/tautan task. Jangan mengklaim telah memverifikasi sumber bila tidak ada bukti dalam task.
+
+Kirim `submit_result(status="done")` dengan objek:
+```json
+{
+  "caption": "Caption final yang tidak menambah klaim baru",
+  "hashtags": ["#topik", "#fakta"],
+  "cover_text": "Teks pendek untuk sampul",
+  "pinned_comment": "Sumber dan konteks klaim",
+  "label_ai": true,
+  "posting_time_suggestions": [{"time": "19:00", "basis": "asumsi"}],
+  "notes": ""
+}
+```
+
+Validasi Hub mewajibkan:
+- `caption` string tidak kosong.
+- `hashtags` berisi 1 sampai 8 item.
+- `cover_text` string tidak kosong.
+
+Gunakan field `cover_text` (bukan `teks_sampul`). Jangan menggunakan `post_artifact` untuk mengirim JSON caption; tool itu hanya mendaftarkan file yang sudah diunggah ke R2. Tidak ada tool publish. PM mengunggah manual dan menyetujui sendiri.

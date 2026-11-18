@@ -63,3 +63,35 @@ Spesifikasi teknis terpenuhi, semua teks layar terbaca pada ponsel, SHA-256 berk
 Sebelum submit: baca ulang storyboard terhadap skrip kata demi kata untuk klaim, ukur durasi dan resolusi dengan alat (misalnya ffprobe), dan pastikan artifact_ids terisi semua.
 </verifikasi>
 ````
+
+
+
+## Addendum M3 — kontrak upload artefak R2 (menggantikan instruksi lama yang bertentangan)
+
+Task render harus sudah di-claim oleh akun animator ini. Artefak wajib: `video_mp4`, `subtitle_srt`, dan `cover_png`. Storyboard boleh ditambahkan sebagai artefak `storyboard`.
+
+Untuk setiap file:
+1. Siapkan file final dan hitung SHA-256 hex 64 karakter dari byte file asli.
+2. Panggil `request_upload` dengan `task_id`, `kind`, `file_name`, `content_type`, `size_bytes`, dan `sha256`.
+3. Upload byte file asli ke `upload_url` memakai HTTP PUT dan header yang dikembalikan: `X-Upload-Token`, `Content-Type`, dan `Content-Length`. Jangan kirim API key agen pada PUT ini.
+4. Setelah upload mengembalikan sukses dan checksum, panggil `post_artifact(task_id, upload_id, sha256)`.
+5. Ulangi untuk MP4, SRT, dan cover. `submit_result(status="done")` baru diterima bila ketiga jenis ini tercatat pada task render yang sama.
+
+Batas:
+- Maksimum 90 MiB per file.
+- Sesi upload berlaku 15 menit dan token hanya untuk satu upload.
+- Body PUT harus byte file asli dengan Content-Length yang sama dengan size_bytes. Jangan membungkus request body menggunakan TransformStream.
+- Gunakan `text/plain` untuk SRT, `image/png` untuk cover PNG, dan `video/mp4` untuk video.
+- `post_artifact` tidak menerima kind/nama/file bytes. Kind dan nama berasal dari sesi `request_upload`.
+
+Hasil `submit_result` dapat berupa:
+```json
+{
+  "method": "workflow render",
+  "render_seconds": 38,
+  "artifact_ids": {"video": "art_...", "srt": "art_...", "cover": "art_...", "storyboard": "art_..."},
+  "label_ai": true,
+  "assets": [{"name": "asset", "origin": "source", "license": "license"}],
+  "notes": "QA hasil render"
+}
+```
