@@ -211,6 +211,8 @@ async function decideApproval(env: Env, approvalId: string, decision: "approve" 
   if (approval.decision) return { ok: false, error: "Persetujuan ini sudah diputuskan." };
   const video = await env.DB.prepare("SELECT id, stage FROM videos WHERE id = ? LIMIT 1").bind(approval.video_id).first<VideoRow>();
   if (!video) return { ok: false, error: "Video untuk persetujuan tidak ditemukan." };
+  const expectedVideoStage = approval.stage === "topic" ? "awaiting_topic_approval" : "awaiting_approval";
+  if (video.stage !== expectedVideoStage) return { ok: false, error: "Tahap video tidak cocok dengan permintaan persetujuan." };
   const nextStage = approval.stage === "topic" ? (decision === "approve" ? "topic_approved" : "topic") : (decision === "approve" ? "approved" : "packaged");
   const timestamp = nowIso();
   const action = approval.stage + "_approval_" + (decision === "approve" ? "approved" : "rejected");
@@ -827,12 +829,13 @@ function createServer(agent: AuthenticatedAgent, env: Env, origin: string): McpS
     if (!task || task.to_agent !== agent.role || task.status !== "claimed" || task.video_id !== session.video_id) return toolError("Tugas bukan lagi milik agen ini atau status bukan claimed.");
     const artifactId = newId("art_"); const timestamp = nowIso();
     await db.batch([
-      db.prepare("INSERT INTO artifacts (id, task_id, video_id, kind, name, uri, sha256, size_bytes, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-        .bind(artifactId, task_id, session.video_id, session.kind, session.file_name, "r2://" + session.object_key, session.sha256, session.size_bytes, agent.name, timestamp),
       db.prepare("UPDATE upload_sessions SET status = 'registered' WHERE id = ? AND status = 'uploaded'").bind(upload_id),
-      db.prepare("INSERT INTO events (ts, actor, action, task_id, video_id, detail) VALUES (?, ?, 'artifact_registered', ?, ?, ?)")
+      db.prepare("INSERT INTO artifacts (id, upload_id, task_id, video_id, kind, name, uri, sha256, size_bytes, created_by, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1")
+        .bind(artifactId, upload_id, task_id, session.video_id, session.kind, session.file_name, "r2://" + session.object_key, session.sha256, session.size_bytes, agent.name, timestamp),
+      db.prepare("INSERT INTO events (ts, actor, action, task_id, video_id, detail) SELECT ?, ?, 'artifact_registered', ?, ?, ? WHERE changes() = 1")
         .bind(timestamp, agent.name, task_id, session.video_id, JSON.stringify({ artifact_id: artifactId, kind: session.kind, sha256: session.sha256, size_bytes: session.size_bytes })),
     ]);
+    if ((batch[0]?.meta?.changes ?? 0) !== 1 || (batch[1]?.meta?.changes ?? 0) !== 1) return toolError("Sesi unggah sudah didaftarkan atau berubah status.");
     return textResult({ artifact_id: artifactId, task_id, video_id: session.video_id, kind: session.kind, sha256: session.sha256, size_bytes: session.size_bytes });
   });
   server.registerTool("get_artifact", {
@@ -1058,23 +1061,15 @@ async function artifactUploadRoute(request: Request, env: Env, uploadId: string)
   const claim = await env.DB.prepare("UPDATE upload_sessions SET status = 'uploading' WHERE id = ? AND status = 'issued'").bind(uploadId).run();
   if ((claim.meta?.changes ?? 0) !== 1) return jsonResponse({ error: "Sesi unggah sedang digunakan." }, 409);
   let bytesWritten = 0;
-  const countingStream = request.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      bytesWritten += chunk.byteLength;
-      if (bytesWritten > session.expected_size || bytesWritten > MAX_ARTIFACT_BYTES) {
-        controller.error(new Error("Ukuran file melebihi batas sesi."));
-        return;
-      }
-      controller.enqueue(chunk);
-    },
-  }));
   try {
-    const stored = await env.ARTIFACTS.put(session.object_key, countingStream, {
+    // Pass the known-length Request body directly. TransformStream removes the
+    // length metadata R2 requires for a streaming PUT.
+    const stored = await env.ARTIFACTS.put(session.object_key, request.body, {
       httpMetadata: { contentType: session.content_type },
       customMetadata: { uploadId, videoId: session.video_id, taskId: session.task_id },
       sha256: hexToBytes(session.expected_sha256),
     });
-    if (!stored || bytesWritten !== session.expected_size || !stored.checksums?.sha256) {
+    if (!stored || stored.size !== session.expected_size || !stored.checksums?.sha256) {
       await env.ARTIFACTS.delete(session.object_key);
       await env.DB.prepare("UPDATE upload_sessions SET status = 'failed' WHERE id = ?").bind(uploadId).run();
       return jsonResponse({ error: "Unggah atau verifikasi ukuran/checksum SHA-256 gagal." }, 400);
@@ -1104,10 +1099,9 @@ async function artifactDownloadRoute(request: Request, env: Env, artifactId: str
   } else {
     const token = request.headers.get("x-download-token") ?? "";
     if (!token) return jsonResponse({ error: "X-Download-Token wajib diisi." }, 401);
-    const tokenRow = await env.DB.prepare("SELECT * FROM artifact_access_tokens WHERE artifact_id = ? AND used_at IS NULL ORDER BY expires_at DESC LIMIT 1")
-      .bind(artifactId).first<ArtifactAccessTokenRow>();
-    if (!tokenRow || Date.parse(tokenRow.expires_at) <= Date.now()) return jsonResponse({ error: "Token unduh tidak ditemukan atau kedaluwarsa." }, 410);
-    if (!constantTimeEqual(tokenRow.token_hash, await sha256(token))) return jsonResponse({ error: "Token unduh tidak valid." }, 401);
+    const tokenRow = await env.DB.prepare("SELECT * FROM artifact_access_tokens WHERE artifact_id = ? AND token_hash = ? AND used_at IS NULL LIMIT 1")
+      .bind(artifactId, await sha256(token)).first<ArtifactAccessTokenRow>();
+    if (!tokenRow || Date.parse(tokenRow.expires_at) <= Date.now()) return jsonResponse({ error: "Token unduh tidak ditemukan, sudah dipakai, atau kedaluwarsa." }, 410);
     const agent = await env.DB.prepare("SELECT id, role, active FROM agents WHERE id = ? LIMIT 1").bind(tokenRow.agent_id)
       .first<{ id: string; role: string; active: number }>();
     const artifactCheck = await env.DB.prepare("SELECT video_id FROM artifacts WHERE id = ? LIMIT 1").bind(artifactId).first<{ video_id: string }>();
