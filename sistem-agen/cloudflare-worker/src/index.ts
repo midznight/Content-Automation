@@ -49,6 +49,7 @@ interface Env {
   PM_TOKEN?: string;
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_PM_CHAT_ID?: string;
+  TELEGRAM_PM_USER_ID?: string;
   TELEGRAM_WEBHOOK_SECRET?: string;
 }
 interface UploadSessionRow {
@@ -1223,7 +1224,7 @@ async function pmRoute(request: Request, env: Env, url: URL): Promise<Response> 
   return jsonResponse({ error: "PM route tidak ditemukan." }, 404);
 }
 async function telegramWebhook(request: Request, env: Env): Promise<Response> {
-  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_PM_CHAT_ID || !env.TELEGRAM_WEBHOOK_SECRET) return jsonResponse({ error: "Telegram webhook belum dikonfigurasi." }, 503);
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_PM_CHAT_ID || !env.TELEGRAM_PM_USER_ID || !env.TELEGRAM_WEBHOOK_SECRET) return jsonResponse({ error: "Telegram webhook memerlukan BOT_TOKEN, PM_CHAT_ID, PM_USER_ID, dan WEBHOOK_SECRET." }, 503);
   const suppliedSecret = request.headers.get("x-telegram-bot-api-secret-token") ?? "";
   if (!constantTimeEqual(suppliedSecret, env.TELEGRAM_WEBHOOK_SECRET)) return jsonResponse({ error: "Webhook secret tidak valid." }, 401);
   let update: Record<string, unknown>;
@@ -1232,7 +1233,9 @@ async function telegramWebhook(request: Request, env: Env): Promise<Response> {
   if (!callback) return jsonResponse({ ok: true });
   const message = callback.message as Record<string, unknown> | undefined;
   const chat = message?.chat as Record<string, unknown> | undefined;
+  const from = callback.from as Record<string, unknown> | undefined;
   if (String(chat?.id ?? "") !== String(env.TELEGRAM_PM_CHAT_ID)) return jsonResponse({ error: "Chat tidak diizinkan." }, 403);
+  if (String(from?.id ?? "") !== String(env.TELEGRAM_PM_USER_ID)) return jsonResponse({ error: "Pengguna bukan PM yang diizinkan." }, 403);
   const match = String(callback.data ?? "").match(/^(approve|reject):([a-zA-Z0-9_-]+)$/);
   if (!match) return jsonResponse({ ok: true });
   const result = await decideApproval(env, match[2], match[1] as "approve" | "reject", "Keputusan melalui Telegram", "pm-telegram");

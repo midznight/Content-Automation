@@ -1,10 +1,17 @@
 name = "content-automation-hub"
 main = "src/index.ts"
-compatibility_date = "2026-11-17"
+compatibility_date = "2026-11-18"
 compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 
 [observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+
+[observability.traces]
 enabled = true
 
 [[d1_databases]]
