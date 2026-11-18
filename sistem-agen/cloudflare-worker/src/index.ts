@@ -1,8 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { z } from "zod";
-import { sha256 as sha256Stream } from "@noble/hashes/sha2.js";
-import { bytesToHex } from "@noble/hashes/utils.js";
 import { evaluateFactCheckGate, validatePackageResult, validateScriptResult } from "./pipeline";
 import { isRole, ROLES, validateTaskRoute, validateToolAccess, type Role } from "./permissions";
 
@@ -24,9 +22,23 @@ interface D1Database {
   batch<T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]>;
 }
 
-interface R2Object { body: ReadableStream<Uint8Array>; httpMetadata?: { contentType?: string }; size: number; }
+interface R2Object {
+  body: ReadableStream<Uint8Array>;
+  httpMetadata?: { contentType?: string };
+  size: number;
+  checksums?: { sha256?: ArrayBuffer };
+}
+interface R2PutResult { size: number; checksums?: { sha256?: ArrayBuffer } }
 interface R2Bucket {
-  put(key: string, value: ReadableStream<Uint8Array> | ArrayBuffer | ArrayBufferView | string, options?: { httpMetadata?: { contentType?: string; contentDisposition?: string }; customMetadata?: Record<string, string> }): Promise<unknown>;
+  put(
+    key: string,
+    value: ReadableStream<Uint8Array> | ArrayBuffer | ArrayBufferView | string,
+    options?: {
+      httpMetadata?: { contentType?: string; contentDisposition?: string };
+      customMetadata?: Record<string, string>;
+      sha256?: ArrayBuffer | string;
+    },
+  ): Promise<R2PutResult | null>;
   get(key: string): Promise<R2Object | null>;
   delete(key: string): Promise<void>;
 }
@@ -41,8 +53,12 @@ interface Env {
 }
 interface UploadSessionRow {
   id: string; task_id: string; video_id: string; agent_id: string; kind: string; file_name: string;
-  content_type: string; expected_size: number; object_key: string; token_hash: string;
+  content_type: string; expected_size: number; expected_sha256: string; object_key: string; token_hash: string;
   status: string; sha256: string | null; size_bytes: number | null; expires_at: string;
+}
+interface ArtifactAccessTokenRow {
+  id: string; artifact_id: string; agent_id: string; token_hash: string;
+  expires_at: string; used_at: string | null;
 }
 interface ApprovalRow {
   id: string; video_id: string; stage: string; requested_at: string; decided_at: string | null;
@@ -165,6 +181,17 @@ function pmAuthorized(request: Request, env: Env): boolean {
 function safeFileName(value: string): string {
   const cleaned = value.normalize("NFKC").replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^\.+/, "").slice(0, 120);
   return cleaned || "artifact.bin";
+}
+function hexToBytes(hex: string): ArrayBuffer {
+  const normalized = hex.toLowerCase();
+  const bytes = new Uint8Array(normalized.length / 2);
+  for (let index = 0; index < normalized.length; index += 2) {
+    bytes[index / 2] = Number.parseInt(normalized.slice(index, index + 2), 16);
+  }
+  return bytes.buffer;
+}
+function bytesToHex(bytes: ArrayBuffer): string {
+  return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 async function notifyPM(env: Env, message: string, replyMarkup?: Record<string, unknown>): Promise<void> {
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_PM_CHAT_ID) return;
@@ -762,8 +789,9 @@ function createServer(agent: AuthenticatedAgent, env: Env, origin: string): McpS
       kind: z.enum(["video_mp4", "subtitle_srt", "cover_png", "storyboard", "source_report", "caption_pack"]),
       file_name: z.string().min(1).max(180), content_type: z.string().min(1).max(100),
       size_bytes: z.number().int().min(1).max(MAX_ARTIFACT_BYTES),
+      sha256: z.string().regex(/^[a-f0-9]{64}$/i),
     },
-  }, async ({ task_id, kind, file_name, content_type, size_bytes }) => {
+  }, async ({ task_id, kind, file_name, content_type, size_bytes, sha256: expectedSha256 }) => {
     validateToolAccess(agent.role, "request_upload");
     if (!ALLOWED_ARTIFACT_KINDS.has(kind)) return toolError("Jenis artefak tidak diizinkan.");
     if (!ALLOWED_CONTENT_TYPES.has(content_type.toLowerCase())) return toolError("Content-Type artefak tidak diizinkan.");
@@ -776,13 +804,14 @@ function createServer(agent: AuthenticatedAgent, env: Env, origin: string): McpS
     const uploadId = newId("upl_"); const token = randomBase64Url(32);
     const createdAt = nowIso(); const expiresAt = new Date(Date.now() + UPLOAD_TTL_MS).toISOString();
     const objectKey = "videos/" + task.video_id + "/" + task.id + "/" + uploadId + "/" + safeFileName(file_name);
-    await db.prepare("INSERT INTO upload_sessions (id, task_id, video_id, agent_id, kind, file_name, content_type, expected_size, object_key, token_hash, status, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'issued', ?, ?)")
-      .bind(uploadId, task.id, task.video_id, agent.id, kind, safeFileName(file_name), content_type.toLowerCase(), size_bytes, objectKey, await sha256(token), createdAt, expiresAt).run();
+    await db.prepare("INSERT INTO upload_sessions (id, task_id, video_id, agent_id, kind, file_name, content_type, expected_size, expected_sha256, object_key, token_hash, status, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'issued', ?, ?)")
+      .bind(uploadId, task.id, task.video_id, agent.id, kind, safeFileName(file_name), content_type.toLowerCase(), size_bytes, expectedSha256.toLowerCase(), objectKey, await sha256(token), createdAt, expiresAt).run();
     return textResult({
       upload_id: uploadId, upload_url: origin + "/artifacts/upload/" + uploadId, method: "PUT",
-      headers: { "X-API-Key": "gunakan kredensial agen yang sama", "X-Upload-Token": token, "Content-Type": content_type.toLowerCase() },
-      expected_size_bytes: size_bytes, maximum_size_bytes: MAX_ARTIFACT_BYTES, expires_at: expiresAt,
-      message: "Unggah ke URL ini sebelum kedaluwarsa; setelah sukses panggil post_artifact.",
+      headers: { "X-Upload-Token": token, "Content-Type": content_type.toLowerCase() },
+      expected_size_bytes: size_bytes, expected_sha256: expectedSha256.toLowerCase(),
+      maximum_size_bytes: MAX_ARTIFACT_BYTES, expires_at: expiresAt,
+      message: "Unggah satu kali ke URL ini. R2 akan memverifikasi SHA-256 saat menyimpan; setelah sukses panggil post_artifact.",
     });
   });
   server.registerTool("post_artifact", {
@@ -817,7 +846,16 @@ function createServer(agent: AuthenticatedAgent, env: Env, origin: string): McpS
     const access = await db.prepare("SELECT 1 AS allowed FROM tasks WHERE video_id = ? AND (to_agent = ? OR from_agent = ?) LIMIT 1")
       .bind(artifact.video_id, agent.role, agent.role).first<{ allowed: number }>();
     if (agent.role !== "ceo" && !access) return toolError("Role ini tidak memiliki akses ke artefak video.");
-    return textResult({ artifact_id, name: artifact.name, kind: artifact.kind, sha256: artifact.sha256, size_bytes: artifact.size_bytes, download_url: origin + "/artifacts/" + artifact_id + "/download", required_header: "X-API-Key" });
+    const tokenId = newId("dlt_");
+    const downloadToken = randomBase64Url(32);
+    const expiresAt = new Date(Date.now() + UPLOAD_TTL_MS).toISOString();
+    await db.prepare("INSERT INTO artifact_access_tokens (id, artifact_id, agent_id, token_hash, expires_at) VALUES (?, ?, ?, ?, ?)")
+      .bind(tokenId, artifact_id, agent.id, await sha256(downloadToken), expiresAt).run();
+    return textResult({
+      artifact_id, name: artifact.name, kind: artifact.kind, sha256: artifact.sha256, size_bytes: artifact.size_bytes,
+      download_url: origin + "/artifacts/" + artifact_id + "/download",
+      headers: { "X-Download-Token": downloadToken }, expires_at: expiresAt,
+    });
   });
   server.registerTool("request_approval", {
     description: "Mengajukan persetujuan topik atau video final kepada PM manusia.",
@@ -998,14 +1036,18 @@ function randomBase64Url(length: number): string {
 }
 
 async function artifactUploadRoute(request: Request, env: Env, uploadId: string): Promise<Response> {
-  const agent = await authenticateAgent(request, env.DB);
-  if (!agent) return jsonResponse({ error: "API key agen tidak valid." }, 401);
-  if (!(await enforceRateLimit(env.DB, agent.keyHash))) return jsonResponse({ error: "Rate limit terlampaui." }, 429);
   const token = request.headers.get("x-upload-token") ?? "";
   if (!token) return jsonResponse({ error: "X-Upload-Token wajib diisi." }, 401);
   const session = await env.DB.prepare("SELECT * FROM upload_sessions WHERE id = ? LIMIT 1").bind(uploadId).first<UploadSessionRow>();
-  if (!session || session.agent_id !== agent.id || session.status !== "issued") return jsonResponse({ error: "Sesi unggah tidak ditemukan, sudah dipakai, atau bukan milik agen ini." }, 404);
+  if (!session || session.status !== "issued") return jsonResponse({ error: "Sesi unggah tidak ditemukan atau sudah dipakai." }, 404);
   if (!constantTimeEqual(session.token_hash, await sha256(token))) return jsonResponse({ error: "Token unggah tidak valid." }, 401);
+  const task = await env.DB.prepare("SELECT to_agent, status FROM tasks WHERE id = ? LIMIT 1").bind(session.task_id)
+    .first<{ to_agent: string; status: string }>();
+  const agent = await env.DB.prepare("SELECT role, active FROM agents WHERE id = ? LIMIT 1").bind(session.agent_id)
+    .first<{ role: string; active: number }>();
+  if (!task || !agent || agent.active !== 1 || task.to_agent !== agent.role || task.status !== "claimed") {
+    return jsonResponse({ error: "Agen atau tugas tidak lagi berhak melakukan unggah ini." }, 403);
+  }
   if (Date.parse(session.expires_at) <= Date.now()) {
     await env.DB.prepare("UPDATE upload_sessions SET status = 'failed' WHERE id = ?").bind(uploadId).run();
     return jsonResponse({ error: "Sesi unggah kedaluwarsa. Minta sesi baru." }, 410);
@@ -1015,22 +1057,35 @@ async function artifactUploadRoute(request: Request, env: Env, uploadId: string)
   if ((request.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase() !== session.content_type) return jsonResponse({ error: "Content-Type tidak sama dengan sesi unggah." }, 415);
   const claim = await env.DB.prepare("UPDATE upload_sessions SET status = 'uploading' WHERE id = ? AND status = 'issued'").bind(uploadId).run();
   if ((claim.meta?.changes ?? 0) !== 1) return jsonResponse({ error: "Sesi unggah sedang digunakan." }, 409);
-  const hasher = sha256Stream.create(); let bytesWritten = 0;
-  const hashingStream = request.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+  let bytesWritten = 0;
+  const countingStream = request.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       bytesWritten += chunk.byteLength;
-      if (bytesWritten > session.expected_size || bytesWritten > MAX_ARTIFACT_BYTES) { controller.error(new Error("Ukuran file melebihi batas sesi.")); return; }
-      hasher.update(chunk); controller.enqueue(chunk);
+      if (bytesWritten > session.expected_size || bytesWritten > MAX_ARTIFACT_BYTES) {
+        controller.error(new Error("Ukuran file melebihi batas sesi."));
+        return;
+      }
+      controller.enqueue(chunk);
     },
   }));
   try {
-    await env.ARTIFACTS.put(session.object_key, hashingStream, { httpMetadata: { contentType: session.content_type }, customMetadata: { uploadId, videoId: session.video_id, taskId: session.task_id } });
-    if (bytesWritten !== session.expected_size) {
+    const stored = await env.ARTIFACTS.put(session.object_key, countingStream, {
+      httpMetadata: { contentType: session.content_type },
+      customMetadata: { uploadId, videoId: session.video_id, taskId: session.task_id },
+      sha256: hexToBytes(session.expected_sha256),
+    });
+    if (!stored || bytesWritten !== session.expected_size || !stored.checksums?.sha256) {
       await env.ARTIFACTS.delete(session.object_key);
       await env.DB.prepare("UPDATE upload_sessions SET status = 'failed' WHERE id = ?").bind(uploadId).run();
-      return jsonResponse({ error: "Ukuran berkas aktual tidak sesuai." }, 400);
+      return jsonResponse({ error: "Unggah atau verifikasi ukuran/checksum SHA-256 gagal." }, 400);
     }
-    const digest = bytesToHex(hasher.digest()); const timestamp = nowIso();
+    const digest = bytesToHex(stored.checksums.sha256);
+    if (!constantTimeEqual(digest, session.expected_sha256)) {
+      await env.ARTIFACTS.delete(session.object_key);
+      await env.DB.prepare("UPDATE upload_sessions SET status = 'failed' WHERE id = ?").bind(uploadId).run();
+      return jsonResponse({ error: "SHA-256 objek R2 tidak cocok dengan checksum yang dijanjikan." }, 400);
+    }
+    const timestamp = nowIso();
     await env.DB.batch([
       env.DB.prepare("UPDATE upload_sessions SET status = 'uploaded', sha256 = ?, size_bytes = ?, uploaded_at = ? WHERE id = ? AND status = 'uploading'").bind(digest, bytesWritten, timestamp, uploadId),
       env.DB.prepare("INSERT INTO events (ts, actor, action, task_id, video_id, detail) VALUES (?, ?, 'artifact_uploaded', ?, ?, ?)").bind(timestamp, agent.name, session.task_id, session.video_id, JSON.stringify({ upload_id: uploadId, kind: session.kind, size_bytes: bytesWritten, sha256: digest })),
@@ -1044,17 +1099,25 @@ async function artifactUploadRoute(request: Request, env: Env, uploadId: string)
   }
 }
 async function artifactDownloadRoute(request: Request, env: Env, artifactId: string, pm = false): Promise<Response> {
-  let role = "pm";
   if (pm) {
     if (!pmAuthorized(request, env)) return jsonResponse({ error: "PM authorization required." }, env.PM_TOKEN ? 401 : 503);
   } else {
-    const agent = await authenticateAgent(request, env.DB);
-    if (!agent) return jsonResponse({ error: "API key agen tidak valid." }, 401);
-    role = agent.role;
-    const probe = await env.DB.prepare("SELECT video_id FROM artifacts WHERE id = ? LIMIT 1").bind(artifactId).first<{ video_id: string }>();
-    if (!probe) return jsonResponse({ error: "Artefak tidak ditemukan." }, 404);
-    const allowed = await env.DB.prepare("SELECT 1 AS allowed FROM tasks WHERE video_id = ? AND (to_agent = ? OR from_agent = ?) LIMIT 1").bind(probe.video_id, role, role).first<{ allowed: number }>();
-    if (role !== "ceo" && !allowed) return jsonResponse({ error: "Role tidak memiliki akses ke artefak ini." }, 403);
+    const token = request.headers.get("x-download-token") ?? "";
+    if (!token) return jsonResponse({ error: "X-Download-Token wajib diisi." }, 401);
+    const tokenRow = await env.DB.prepare("SELECT * FROM artifact_access_tokens WHERE artifact_id = ? AND used_at IS NULL ORDER BY expires_at DESC LIMIT 1")
+      .bind(artifactId).first<ArtifactAccessTokenRow>();
+    if (!tokenRow || Date.parse(tokenRow.expires_at) <= Date.now()) return jsonResponse({ error: "Token unduh tidak ditemukan atau kedaluwarsa." }, 410);
+    if (!constantTimeEqual(tokenRow.token_hash, await sha256(token))) return jsonResponse({ error: "Token unduh tidak valid." }, 401);
+    const agent = await env.DB.prepare("SELECT id, role, active FROM agents WHERE id = ? LIMIT 1").bind(tokenRow.agent_id)
+      .first<{ id: string; role: string; active: number }>();
+    const artifactCheck = await env.DB.prepare("SELECT video_id FROM artifacts WHERE id = ? LIMIT 1").bind(artifactId).first<{ video_id: string }>();
+    if (!agent || agent.active !== 1 || !artifactCheck) return jsonResponse({ error: "Agen atau artefak tidak aktif." }, 403);
+    const allowed = await env.DB.prepare("SELECT 1 AS allowed FROM tasks WHERE video_id = ? AND (to_agent = ? OR from_agent = ?) LIMIT 1")
+      .bind(artifactCheck.video_id, agent.role, agent.role).first<{ allowed: number }>();
+    if (agent.role !== "ceo" && !allowed) return jsonResponse({ error: "Role tidak memiliki akses ke artefak ini." }, 403);
+    const used = await env.DB.prepare("UPDATE artifact_access_tokens SET used_at = ? WHERE id = ? AND used_at IS NULL")
+      .bind(nowIso(), tokenRow.id).run();
+    if ((used.meta?.changes ?? 0) !== 1) return jsonResponse({ error: "Token unduh sudah dipakai." }, 409);
   }
   const artifact = await env.DB.prepare("SELECT id, name, uri, sha256 FROM artifacts WHERE id = ? LIMIT 1").bind(artifactId).first<{ id: string; name: string; uri: string; sha256: string }>();
   if (!artifact) return jsonResponse({ error: "Artefak tidak ditemukan." }, 404);
