@@ -40,6 +40,11 @@ const TOOL_PERMISSIONS: Record<string, ReadonlySet<Role>> = {
   submit_result: new Set(ROLES.filter((role) => role !== "pm")),
   send_task: new Set<Role>(["ceo"]),
   list_tasks: ALL_ROLES,
+  create_video: new Set<Role>(["ceo"]),
+  request_upload: new Set(ROLES.filter((role) => role !== "pm")),
+  post_artifact: new Set(ROLES.filter((role) => role !== "pm")),
+  get_artifact: new Set(ROLES.filter((role) => role !== "pm")),
+  request_approval: new Set<Role>(["ceo"]),
 };
 
 export const FORBIDDEN_TOOLS = new Set(["approve", "publish"]);

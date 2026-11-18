@@ -12,3 +12,10 @@ binding = "DB"
 database_name = "content-automation-hub-prod"
 database_id = "d80ecae4-6171-4526-a289-e6c138b5a9c4"
 migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "ARTIFACTS"
+bucket_name = "content-automation-artifacts-prod"
+
+[triggers]
+crons = ["*/15 * * * *", "0 0 * * *"]
