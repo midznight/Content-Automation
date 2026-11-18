@@ -4,9 +4,10 @@ on:
   push:
     branches: [main]
     paths:
-      - "sistem-agen/scripts/production-e2e.mjs"
-      - "sistem-agen/cloudflare-worker/src/**"
       - ".github/workflows/production-e2e.yml"
+  workflow_run:
+    workflows: ["Deploy Content Automation Hub"]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
