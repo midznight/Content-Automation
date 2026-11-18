@@ -13,7 +13,7 @@ Workflow memakai repository secret \`CLOUDFLARE_API_TOKEN\` yang sudah dipakai w
 
 ## Isolasi dan pembersihan
 
-Run membuat satu agen CEO sementara dengan API key acak satu kali, satu video bertanda \`E2E QA ONLY\`, dan satu approval topik. Setelah tes, workflow menghapus agen, video, approval, event audit, dan tabel anak yang terkait. Nilai key tidak dicetak dan tidak mengganti tujuh akun agen aktif.
+Run membuat satu agen CEO sementara dengan API key acak satu kali, satu video bertanda \`E2E QA ONLY\`, dan satu approval topik. Setelah tes, workflow menghapus agen sementara, video, approval, metrics, artifacts, dan tasks QA. Baris pada tabel `events` sengaja dipertahankan karena audit log bersifat append-only. Nilai key tidak dicetak dan tidak mengganti tujuh akun agen aktif.
 
 ## Batas cakupan
 
