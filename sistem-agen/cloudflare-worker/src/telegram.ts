@@ -12,13 +12,13 @@ export function parseTelegramCommand(text: string): TelegramCommand | null {
 }
 
 const ROLE_LABELS: Record<string, string> = {
-  ceo: "CEO — Cue",
-  strategist: "Strategist — Muse",
-  fact_checker: "Fact Checker — Muse",
-  animator: "Animator — Cue",
+  ceo: "Muse Controller",
+  strategist: "Legacy Strategist — inactive after Muse migration",
+  fact_checker: "Legacy Fact Checker — inactive after Muse migration",
+  animator: "Animator Primary — Muse",
   animator_backup: "Animator Backup — Muse",
-  analyst: "Analyst — Muse",
-  social: "Social — Muse",
+  analyst: "Legacy Analyst — inactive after Muse migration",
+  social: "Legacy Social — inactive after Muse migration",
 };
 
 export function formatTelegramAgentReply(

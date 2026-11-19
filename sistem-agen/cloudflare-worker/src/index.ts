@@ -4,7 +4,6 @@ import { z } from "zod";
 import { evaluateFactCheckGate, validatePackageResult, validateScriptResult } from "./pipeline";
 import { isRole, ROLES, validateTaskRoute, validateToolAccess, type Role } from "./permissions";
 import { formatTelegramAgentReply, parseTelegramCommand } from "./telegram";
-import { ManusApiError, sendManusAgentMessage } from "./manus";
 
 interface D1Result<T = Record<string, unknown>> {
   results?: T[];
@@ -22,6 +21,10 @@ interface D1PreparedStatement {
 interface D1Database {
   prepare(query: string): D1PreparedStatement;
   batch<T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]>;
+}
+
+interface WorkerExecutionContext {
+  waitUntil(promise: Promise<unknown>): void;
 }
 
 interface R2Object {
@@ -44,10 +47,6 @@ interface R2Bucket {
   get(key: string): Promise<R2Object | null>;
   delete(key: string): Promise<void>;
 }
-interface WorkerExecutionContext {
-  waitUntil(promise: Promise<unknown>): void;
-}
-
 interface Env {
   DB: D1Database;
   ARTIFACTS: R2Bucket;
@@ -58,9 +57,6 @@ interface Env {
   TELEGRAM_GROUP_CHAT_ID?: string;
   TELEGRAM_PM_USER_ID?: string;
   TELEGRAM_WEBHOOK_SECRET?: string;
-  MANUS_API_KEY?: string;
-  MANUS_CEO_TASK_ID?: string;
-  MANUS_ANIMATOR_TASK_ID?: string;
 }
 interface UploadSessionRow {
   id: string; task_id: string; video_id: string; agent_id: string; kind: string; file_name: string;
@@ -232,110 +228,6 @@ async function notifyPM(env: Env, message: string, replyMarkup?: Record<string, 
   await sendTelegramMessage(env, chatId, message, replyMarkup);
 }
 
-async function dispatchCueTask(env: Env, hubTaskId: string): Promise<void> {
-  const dispatch = await env.DB.prepare(
-    "SELECT d.role, d.status, d.attempts, t.title, t.status AS task_status " +
-      "FROM agent_dispatches d JOIN tasks t ON t.id = d.task_id WHERE d.task_id = ? LIMIT 1",
-  ).bind(hubTaskId).first<{
-    role: string; status: string; attempts: number; title: string; task_status: string;
-  }>();
-  if (!dispatch || dispatch.task_status !== "queued") return;
-  if (dispatch.status !== "pending" && dispatch.status !== "retry") return;
-  if (dispatch.role !== "ceo" && dispatch.role !== "animator") {
-    await env.DB.prepare(
-      "UPDATE agent_dispatches SET status = 'failed', last_error = ?, updated_at = ? WHERE task_id = ? AND status IN ('pending', 'retry')",
-    ).bind("Role Cue belum didukung oleh adapter.", nowIso(), hubTaskId).run();
-    return;
-  }
-
-  const agentMainTaskId = dispatch.role === "ceo" ? env.MANUS_CEO_TASK_ID : env.MANUS_ANIMATOR_TASK_ID;
-  if (!env.MANUS_API_KEY || !agentMainTaskId) {
-    const missing = [
-      !env.MANUS_API_KEY ? "MANUS_API_KEY" : "",
-      !agentMainTaskId ? (dispatch.role === "ceo" ? "MANUS_CEO_TASK_ID" : "MANUS_ANIMATOR_TASK_ID") : "",
-    ].filter(Boolean);
-    const timestamp = nowIso();
-    await env.DB.prepare(
-      "UPDATE agent_dispatches SET status = 'awaiting_config', last_error = ?, updated_at = ? WHERE task_id = ? AND status IN ('pending', 'retry')",
-    ).bind("Konfigurasi belum lengkap: " + missing.join(", "), timestamp, hubTaskId).run();
-    await notifyPM(env,
-      "Cue belum dapat dibangunkan untuk task " + hubTaskId + ". Konfigurasi Worker yang dibutuhkan: " +
-      missing.join(", ") + ". Setelah disimpan dan Worker di-deploy, jalankan /wake " + hubTaskId + ".");
-    return;
-  }
-
-  const attemptedAt = nowIso();
-  const claim = await env.DB.prepare(
-    "UPDATE agent_dispatches SET status = 'sending', attempts = attempts + 1, last_attempt_at = ?, updated_at = ? " +
-      "WHERE task_id = ? AND status IN ('pending', 'retry') AND (next_attempt_at IS NULL OR next_attempt_at <= ?)",
-  ).bind(attemptedAt, attemptedAt, hubTaskId, attemptedAt).run();
-  if ((claim.meta?.changes ?? 0) !== 1) return;
-  const attemptNumber = dispatch.attempts + 1;
-
-  try {
-    const result = await sendManusAgentMessage(
-      env.MANUS_API_KEY,
-      agentMainTaskId,
-      hubTaskId,
-      dispatch.role,
-      dispatch.title,
-    );
-    const completedAt = nowIso();
-    const saved = await env.DB.prepare(
-      "UPDATE agent_dispatches SET status = 'dispatched', dispatched_at = ?, external_request_id = ?, " +
-        "next_attempt_at = NULL, last_error = NULL, updated_at = ? WHERE task_id = ? AND status = 'sending'",
-    ).bind(completedAt, result.requestId, completedAt, hubTaskId).run();
-    if ((saved.meta?.changes ?? 0) === 1) {
-      await notifyPM(env,
-        "Wake-up Cue diterima Manus API. Role: " + dispatch.role + "\nHub task: " + hubTaskId +
-        "\nStatus ini berarti pesan diterima; hasil pengerjaan tetap menunggu submit_result melalui MCP.");
-    }
-  } catch (error) {
-    const status = error instanceof ManusApiError ? error.status : 0;
-    const transient = !(error instanceof ManusApiError) || status === 429 || status >= 500;
-    const retryAllowed = transient && attemptNumber < 5;
-    const nextStatus = retryAllowed ? "retry" : "failed";
-    const retryMinutes = Math.min(60, 15 * Math.pow(2, Math.max(0, attemptNumber - 1)));
-    const retryAt = retryAllowed ? new Date(Date.now() + retryMinutes * 60_000).toISOString() : null;
-    const detail = (error instanceof Error ? error.message : "Unknown Manus API error").slice(0, 300);
-    const failedAt = nowIso();
-    await env.DB.prepare(
-      "UPDATE agent_dispatches SET status = ?, last_error = ?, next_attempt_at = ?, updated_at = ? WHERE task_id = ? AND status = 'sending'",
-    ).bind(nextStatus, detail, retryAt, failedAt, hubTaskId).run();
-    await notifyPM(env,
-      "Wake-up Cue gagal dikirim untuk task " + hubTaskId + " (HTTP " + (status || "network") + "). " +
-      (retryAllowed ? "Akan dicoba ulang sekitar " + retryMinutes + " menit lagi." : "Perlu pemeriksaan konfigurasi/API.") +
-      "\nDetail: " + detail);
-  }
-}
-
-async function runAgentDispatchSweep(env: Env): Promise<void> {
-  const timestamp = nowIso();
-  const staleSendingCutoff = new Date(Date.now() - 30 * 60_000).toISOString();
-  await env.DB.prepare(
-    "UPDATE agent_dispatches SET status = 'retry', next_attempt_at = ?, last_error = 'Dispatch worker interrupted; retry scheduled.', updated_at = ? " +
-      "WHERE status = 'sending' AND last_attempt_at <= ?",
-  ).bind(timestamp, timestamp, staleSendingCutoff).run();
-
-  // Backfill queued Cue work created before the outbox was introduced.
-  await env.DB.prepare(
-    "INSERT INTO agent_dispatches (id, task_id, role, provider, status, attempts, created_at, updated_at) " +
-      "SELECT 'dsp_' || lower(hex(randomblob(6))), t.id, t.to_agent, 'manus', 'pending', 0, t.created_at, ? " +
-      "FROM tasks t JOIN agents a ON a.role = t.to_agent AND a.active = 1 " +
-      "WHERE a.vendor = 'cue' AND t.status = 'queued' " +
-      "AND t.to_agent IN ('ceo', 'animator') " +
-      "AND NOT EXISTS (SELECT 1 FROM agent_dispatches d WHERE d.task_id = t.id) " +
-      "ON CONFLICT(task_id) DO NOTHING",
-  ).bind(timestamp).run();
-
-  const pending = await env.DB.prepare(
-    "SELECT d.task_id FROM agent_dispatches d JOIN tasks t ON t.id = d.task_id " +
-      "WHERE d.status IN ('pending', 'retry') AND t.status = 'queued' " +
-      "AND (d.next_attempt_at IS NULL OR d.next_attempt_at <= ?) ORDER BY d.created_at LIMIT 25",
-  ).bind(timestamp).all<{ task_id: string }>();
-  for (const item of pending.results ?? []) await dispatchCueTask(env, item.task_id);
-}
-
 async function decideApproval(env: Env, approvalId: string, decision: "approve" | "reject", note: string, actor: string): Promise<{ ok: boolean; error?: string; video_id?: string; stage?: string }> {
   const approval = await env.DB.prepare("SELECT * FROM approvals WHERE id = ? LIMIT 1").bind(approvalId).first<ApprovalRow>();
   if (!approval) return { ok: false, error: "Persetujuan tidak ditemukan." };
@@ -426,7 +318,7 @@ function textResult(value: unknown) {
   };
 }
 
-function createServer(agent: AuthenticatedAgent, env: Env, origin: string, ctx: WorkerExecutionContext): McpServer {
+function createServer(agent: AuthenticatedAgent, env: Env, origin: string): McpServer {
   const db = env.DB;
   const server = new McpServer({
     name: "content-automation-hub",
@@ -791,8 +683,6 @@ function createServer(agent: AuthenticatedAgent, env: Env, origin: string, ctx: 
         if (oldTask.type !== type || oldTask.video_id !== (video_id ?? null)) return toolError("Tugas pengganti harus memakai tipe tugas dan video_id yang sama.");
         if (type !== "render" || oldTask.to_agent !== "animator" || to !== "animator_backup") return toolError("Failover hanya diizinkan dari animator ke animator_backup untuk tugas render.");
       }
-      const targetAgent = await db.prepare("SELECT vendor FROM agents WHERE role = ? AND active = 1 LIMIT 1")
-        .bind(to).first<{ vendor: string }>();
       const createdAt = nowIso();
       const taskId = newId("tsk_");
       const statements: D1PreparedStatement[] = [];
@@ -856,14 +746,6 @@ function createServer(agent: AuthenticatedAgent, env: Env, origin: string, ctx: 
             dueAt,
           ),
       );
-      if (targetAgent?.vendor === "cue" && (to === "ceo" || to === "animator")) {
-        statements.push(
-          db.prepare(
-            "INSERT INTO agent_dispatches (id, task_id, role, provider, status, attempts, created_at, updated_at) " +
-              "VALUES (?, ?, ?, 'manus', 'pending', 0, ?, ?) ON CONFLICT(task_id) DO NOTHING",
-          ).bind(newId("dsp_"), taskId, to, createdAt, createdAt),
-        );
-      }
       statements.push(
         db
           .prepare(
@@ -879,9 +761,6 @@ function createServer(agent: AuthenticatedAgent, env: Env, origin: string, ctx: 
       );
 
       await db.batch(statements);
-      if (targetAgent?.vendor === "cue" && (to === "ceo" || to === "animator")) {
-        ctx.waitUntil(dispatchCueTask(env, taskId));
-      }
       return textResult({
         task_id: taskId,
         status: "queued",
@@ -1407,7 +1286,7 @@ async function pmRoute(request: Request, env: Env, url: URL): Promise<Response> 
   if (request.method === "GET" && artifactMatch) return artifactDownloadRoute(request, env, decodeURIComponent(artifactMatch[1]), true);
   return jsonResponse({ error: "PM route tidak ditemukan." }, 404);
 }
-const TELEGRAM_AGENT_ROLES = ["ceo", "strategist", "fact_checker", "animator", "animator_backup", "analyst", "social"] as const;
+const TELEGRAM_AGENT_ROLES = ["ceo", "animator", "animator_backup"] as const;
 type TelegramAgentRole = (typeof TELEGRAM_AGENT_ROLES)[number];
 
 async function telegramThreadId(chatId: string): Promise<string> {
@@ -1417,15 +1296,15 @@ async function telegramThreadId(chatId: string): Promise<string> {
 async function createTelegramChatTask(
   env: Env, role: TelegramAgentRole, type: "chat_message" | "group_discussion",
   prompt: string, chatId: string, messageId: string, username: string,
-): Promise<{ taskId: string; vendor: string }> {
-  const active = await env.DB.prepare("SELECT id, vendor FROM agents WHERE role = ? AND active = 1 LIMIT 1")
-    .bind(role).first<{ id: string; vendor: string }>();
+): Promise<{ taskId: string }> {
+  const active = await env.DB.prepare("SELECT id FROM agents WHERE role = ? AND active = 1 AND vendor = 'muse' LIMIT 1")
+    .bind(role).first<{ id: string }>();
   if (!active) throw new Error("Akun agen untuk role '" + role + "' belum aktif di Hub.");
   const threadId = await telegramThreadId(chatId);
   const existingMessage = await env.DB.prepare(
     "SELECT task_id FROM chat_messages WHERE external_chat_id = ? AND external_message_id = ? AND direction = 'inbound' LIMIT 1",
   ).bind(chatId, messageId).first<{ task_id: string | null }>();
-  if (existingMessage?.task_id) return { taskId: existingMessage.task_id, vendor: active.vendor };
+  if (existingMessage?.task_id) return { taskId: existingMessage.task_id };
   const historyRows = await env.DB.prepare(
     "SELECT actor, role, direction, message_text, created_at FROM chat_messages WHERE thread_id = ? ORDER BY created_at DESC LIMIT 8",
   ).bind(threadId).all<Record<string, unknown>>();
@@ -1440,7 +1319,7 @@ async function createTelegramChatTask(
     telegram_message_id: messageId, requested_by: username || "PM", prompt,
     conversation_history: history,
     instructions: type === "group_discussion"
-      ? "Pimpin diskusi multi-agen. Pilih maksimal tiga spesialis yang relevan, kumpulkan hasil mereka melalui Hub, baca hasil penuh dengan get_task_result, lalu submit_result pada task diskusi asli dengan result.answer dan result.consulted. Jangan membuat diskusi rekursif."
+      ? "Bertindak sebagai Muse Controller tunggal. Kerjakan riset, strategi, fact-check, dan QA secara langsung. Gunakan send_task hanya bila Animator Primary atau Backup memang diperlukan untuk produksi visual. Baca hasil tugas anak melalui get_task_result, lalu submit_result pada task diskusi asli dengan result.answer dan result.consulted. Jangan membuat diskusi rekursif."
       : "Jawab pertanyaan PM secara langsung dan ringkas. Kirim hasil melalui submit_result dengan result.answer. Jangan mengubah state pipeline atau melakukan publikasi.",
   };
   const statements: D1PreparedStatement[] = [
@@ -1453,14 +1332,6 @@ async function createTelegramChatTask(
       "VALUES (?, ?, ?, ?, 'normal', 'pm-telegram', ?, 'queued', 1, ?, ?)",
     ).bind(taskId, type, "Telegram " + (type === "group_discussion" ? "discussion" : "chat") + ": " + prompt.slice(0, 160), JSON.stringify(payload), role, createdAt, createdAt),
   ];
-  if (active.vendor === "cue" && (role === "ceo" || role === "animator")) {
-    statements.push(
-      env.DB.prepare(
-        "INSERT INTO agent_dispatches (id, task_id, role, provider, status, attempts, created_at, updated_at) " +
-          "VALUES (?, ?, ?, 'manus', 'pending', 0, ?, ?)",
-      ).bind(newId("dsp_"), taskId, role, createdAt, createdAt),
-    );
-  }
   statements.push(
     env.DB.prepare(
       "INSERT INTO events (ts, actor, action, task_id, detail) VALUES (?, 'pm-telegram', 'telegram_chat_task_created', ?, ?)",
@@ -1471,10 +1342,10 @@ async function createTelegramChatTask(
     ).bind(newId("msg_"), threadId, taskId, prompt, chatId, messageId, createdAt),
   );
   await env.DB.batch(statements);
-  return { taskId, vendor: active.vendor };
+  return { taskId };
 }
 
-async function handleTelegramMessage(env: Env, message: Record<string, unknown>, ctx: WorkerExecutionContext): Promise<Response> {
+async function handleTelegramMessage(env: Env, message: Record<string, unknown>): Promise<Response> {
   const from = message.from as Record<string, unknown> | undefined;
   const chat = message.chat as Record<string, unknown> | undefined;
   const chatId = String(chat?.id ?? "");
@@ -1519,14 +1390,13 @@ async function handleTelegramMessage(env: Env, message: Record<string, unknown>,
   if (parsed.name === "help" || parsed.name === "start") {
     await send(
       "Content-Automation Chat Gateway\n" +
-      "/ask <role> <pertanyaan> — tanya satu agen\n" +
-      "/discuss <topik> — CEO memimpin diskusi maksimal tiga spesialis\n" +
-      "/status — ringkasan sistem tanpa membangunkan AI\n" +
+      "/ask <role> <pertanyaan> — kirim tugas ke Muse Controller atau Animator\n" +
+      "/discuss <topik> — Controller memimpin analisis\n" +
+      "/status — ringkasan sistem tanpa memanggil AI\n" +
       "/agents — daftar agen aktif\n" +
       "/approvals — daftar approval menunggu\n" +
       "/approve <approval_id> — setujui\n" +
       "/reject <approval_id> <catatan> — tolak\n" +
-      "/wake <hub_task_id> — bangunkan ulang task Cue yang masih queued\n" +
       "/help — bantuan"
     );
     return jsonResponse({ ok: true });
@@ -1573,32 +1443,7 @@ async function handleTelegramMessage(env: Env, message: Record<string, unknown>,
     return jsonResponse({ ok: result.ok });
   }
   if (parsed.name === "wake") {
-    const hubTaskId = parsed.args.trim();
-    if (!/^[a-zA-Z0-9_-]{8,64}$/.test(hubTaskId)) {
-      await send("Format: /wake <hub_task_id>");
-      return jsonResponse({ ok: true });
-    }
-    const task = await env.DB.prepare(
-      "SELECT t.id, t.to_agent, t.status, a.vendor FROM tasks t " +
-        "JOIN agents a ON a.role = t.to_agent AND a.active = 1 WHERE t.id = ? LIMIT 1",
-    ).bind(hubTaskId).first<{ id: string; to_agent: string; status: string; vendor: string }>();
-    if (!task || task.vendor !== "cue" || (task.to_agent !== "ceo" && task.to_agent !== "animator")) {
-      await send("Task tidak ditemukan atau role-nya tidak didukung adapter Cue.");
-      return jsonResponse({ ok: true });
-    }
-    if (task.status !== "queued") {
-      await send("Task " + hubTaskId + " tidak berstatus queued (status: " + task.status + "). Tidak dikirim ulang.");
-      return jsonResponse({ ok: true });
-    }
-    const timestamp = nowIso();
-    await env.DB.prepare(
-      "INSERT INTO agent_dispatches (id, task_id, role, provider, status, attempts, created_at, updated_at) " +
-        "VALUES (?, ?, ?, 'manus', 'pending', 0, ?, ?) " +
-        "ON CONFLICT(task_id) DO UPDATE SET status = 'pending', attempts = 0, last_attempt_at = NULL, " +
-        "next_attempt_at = NULL, dispatched_at = NULL, external_request_id = NULL, last_error = NULL, updated_at = excluded.updated_at",
-    ).bind(newId("dsp_"), hubTaskId, task.to_agent, timestamp, timestamp).run();
-    ctx.waitUntil(dispatchCueTask(env, hubTaskId));
-    await send("Wake-up diminta untuk Cue " + task.to_agent + ". Hub task: " + hubTaskId + ". Hasil akan dikirim setelah agen menyelesaikannya.");
+    await send("Perintah /wake Manus sudah dinonaktifkan selama migrasi ke Muse. Tugas baru diproses melalui Custom Connector Muse di inbox akun terkait.");
     return jsonResponse({ ok: true });
   }
   if (parsed.name === "ask") {
@@ -1614,14 +1459,9 @@ async function handleTelegramMessage(env: Env, message: Record<string, unknown>,
     }
     try {
       const created = await createTelegramChatTask(env, role as TelegramAgentRole, "chat_message", match[2].trim(), chatId, messageId, username);
-      if (created.vendor === "cue" && (role === "ceo" || role === "animator")) {
-        ctx.waitUntil(dispatchCueTask(env, created.taskId));
-        await send("Pertanyaan masuk ke antrean " + role + " dan wake-up Cue sedang dikirim.\nTask ID: " + created.taskId +
-          "\nBot akan memberi kabar ketika Manus menerima wake-up. Hasil baru muncul setelah task selesai melalui Hub.");
-      } else {
-        await send("Pertanyaan masuk ke antrean " + role + ".\nTask ID: " + created.taskId +
-          "\nAkun Muse belum memiliki adapter wake-up otomatis; agen perlu mengambil task melalui koneksi MCP aktif.");
-      }
+      const roleLabel = role === "ceo" ? "Muse Controller" : role === "animator" ? "Animator Primary" : "Animator Backup";
+      await send("Tugas masuk ke antrean " + roleLabel + ".\nTask ID: " + created.taskId +
+        "\nMuse App tidak dibangunkan oleh Telegram. Buka akun Muse yang sesuai, lalu minta agen memeriksa inbox Content Automation Hub, mengklaim task ini, memprosesnya, dan mengirim submit_result.");
     } catch (error) {
       await send("Tidak dapat membuat task: " + (error instanceof Error ? error.message : "kesalahan sistem"));
     }
@@ -1634,8 +1474,8 @@ async function handleTelegramMessage(env: Env, message: Record<string, unknown>,
     }
     try {
       const created = await createTelegramChatTask(env, "ceo", "group_discussion", parsed.args, chatId, messageId, username);
-      ctx.waitUntil(dispatchCueTask(env, created.taskId));
-      await send("Diskusi masuk ke antrean CEO. Wake-up Cue sedang dikirim; CEO akan memilih maksimal tiga spesialis yang relevan.\nTask ID: " + created.taskId);
+      await send("Diskusi masuk ke antrean Muse Controller.\nTask ID: " + created.taskId +
+        "\nBuka akun Muse Controller dan minta agen memeriksa inbox Content Automation Hub, mengambil task ini, melakukan analisis, lalu mengirim submit_result.");
     } catch (error) {
       await send("Tidak dapat membuat diskusi: " + (error instanceof Error ? error.message : "kesalahan sistem"));
     }
@@ -1645,7 +1485,7 @@ async function handleTelegramMessage(env: Env, message: Record<string, unknown>,
   return jsonResponse({ ok: true });
 }
 
-async function telegramWebhook(request: Request, env: Env, ctx: WorkerExecutionContext): Promise<Response> {
+async function telegramWebhook(request: Request, env: Env): Promise<Response> {
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_PM_USER_ID || !env.TELEGRAM_WEBHOOK_SECRET) {
     return jsonResponse({ error: "Telegram webhook memerlukan BOT_TOKEN, PM_USER_ID, dan WEBHOOK_SECRET." }, 503);
   }
@@ -1654,7 +1494,7 @@ async function telegramWebhook(request: Request, env: Env, ctx: WorkerExecutionC
   let update: Record<string, unknown>;
   try { update = await request.json() as Record<string, unknown>; } catch { return jsonResponse({ error: "Body Telegram tidak valid." }, 400); }
   const incomingMessage = update.message as Record<string, unknown> | undefined;
-  if (incomingMessage) return handleTelegramMessage(env, incomingMessage, ctx);
+  if (incomingMessage) return handleTelegramMessage(env, incomingMessage);
 
   const callback = update.callback_query as Record<string, unknown> | undefined;
   if (!callback) return jsonResponse({ ok: true });
@@ -1673,136 +1513,10 @@ async function telegramWebhook(request: Request, env: Env, ctx: WorkerExecutionC
   });
   return jsonResponse({ ok: result.ok, error: result.error });
 }
-async function runStaleTaskSweep(env: Env): Promise<void> {
-  const backup = await env.DB.prepare(
-    "SELECT id FROM agents WHERE role = 'animator_backup' AND active = 1 LIMIT 1",
-  ).first<{ id: string }>();
-  const cutoff = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
-  const claimed = await env.DB.prepare(
-    "SELECT id, parent_id, type, video_id, to_agent, title, payload, priority, attempt, due_at, updated_at " +
-      "FROM tasks WHERE status = 'claimed' AND updated_at <= ? ORDER BY updated_at LIMIT 100",
-  ).bind(cutoff).all<{
-    id: string; parent_id: string | null; type: string; video_id: string | null; to_agent: string;
-    title: string; payload: string; priority: string; attempt: number; due_at: string | null; updated_at: string;
-  }>();
-
-  for (const task of claimed.results ?? []) {
-    const timestamp = nowIso();
-    if (task.type === "render" && task.to_agent === "animator" && backup) {
-      await queueAnimatorFailover(env, task, "stale_after_4h", timestamp);
-      continue;
-    }
-    const action = task.type === "render" ? "needs_reassign" : "task_stale";
-    const batch = await env.DB.batch([
-      env.DB.prepare("UPDATE tasks SET status = 'stale', updated_at = ? WHERE id = ? AND status = 'claimed' AND updated_at = ?")
-        .bind(timestamp, task.id, task.updated_at),
-      env.DB.prepare(
-        "INSERT INTO events (ts, actor, action, task_id, video_id, detail) " +
-          "SELECT ?, 'system', 'task_status_stale', id, video_id, ? FROM tasks " +
-          "WHERE id = ? AND status = 'stale' AND updated_at = ? AND changes() = 1",
-      ).bind(timestamp, JSON.stringify({ previous_status: "claimed", new_status: "stale", previous_owner: task.to_agent }), task.id, timestamp),
-      env.DB.prepare(
-        "INSERT INTO events (ts, actor, action, task_id, video_id, detail) " +
-          "SELECT ?, 'system', ?, id, video_id, ? FROM tasks WHERE id = ? AND status = 'stale' AND updated_at = ? AND changes() = 1",
-      ).bind(timestamp, action, JSON.stringify({ task_type: task.type, previous_owner: task.to_agent, escalation: task.type === "render" ? "ceo_review" : "pm_review" }), task.id, timestamp),
-    ]);
-    if ((batch[0]?.meta?.changes ?? 0) === 1) {
-      await notifyPM(env, "Tugas " + task.id + " menjadi stale setelah lebih dari 4 jam. Pemilik: " + task.to_agent +
-        (task.type === "render" ? (backup ? ". CEO/PM perlu meninjau." : ". Animator cadangan tidak aktif; perlu intervensi PM.") : "."));
-    }
-  }
-
-  // Explicit failure and capacity blocks are retried on the backup during the next 15-minute sweep.
-  if (backup) {
-    const failed = await env.DB.prepare(
-      "SELECT id, parent_id, video_id, title, payload, priority, attempt, due_at, status, blocked_reason " +
-        "FROM tasks t WHERE t.type = 'render' AND t.to_agent = 'animator' " +
-        "AND (t.status = 'failed' OR (t.status = 'blocked' AND t.blocked_reason IN ('limit', 'failed'))) " +
-        "AND NOT EXISTS (SELECT 1 FROM tasks replacement WHERE replacement.reassigned_from = t.id) " +
-        "ORDER BY t.updated_at LIMIT 100",
-    ).all<{
-      id: string; parent_id: string | null; video_id: string | null; title: string; payload: string;
-      priority: string; attempt: number; due_at: string | null; status: string; blocked_reason: string | null;
-    }>();
-    for (const task of failed.results ?? []) {
-      await queueAnimatorFailover(env, task, task.status === "failed" ? "render_failed" : "render_capacity_or_failure");
-    }
-  }
-}
-
-async function queueAnimatorFailover(
-  env: Env,
-  task: {
-    id: string; parent_id: string | null; video_id: string | null; title: string; payload: string;
-    priority: string; attempt: number; due_at: string | null; status?: string; updated_at?: string;
-  },
-  reason: string,
-  timestamp = nowIso(),
-): Promise<void> {
-  const replacementId = newId("tsk_");
-  const previousStatus = task.status ?? "claimed";
-  const update = previousStatus === "claimed"
-    ? env.DB.prepare(
-        "UPDATE tasks SET status = 'superseded', updated_at = ? WHERE id = ? AND status = 'claimed' AND updated_at = ?",
-      ).bind(timestamp, task.id, task.updated_at)
-    : env.DB.prepare(
-        "UPDATE tasks SET status = 'superseded', updated_at = ? WHERE id = ? AND status = ? " +
-          "AND NOT EXISTS (SELECT 1 FROM tasks replacement WHERE replacement.reassigned_from = tasks.id)",
-      ).bind(timestamp, task.id, previousStatus);
-  const batch = await env.DB.batch([
-    update,
-    env.DB.prepare(
-      "INSERT INTO events (ts, actor, action, task_id, video_id, detail) " +
-        "SELECT ?, 'system', 'task_status_superseded', id, video_id, ? FROM tasks " +
-        "WHERE id = ? AND status = 'superseded' AND updated_at = ? AND changes() = 1",
-    ).bind(timestamp, JSON.stringify({
-      previous_status: previousStatus,
-      new_status: "superseded",
-      previous_owner: "animator",
-      failover: "animator_backup",
-      reason,
-    }), task.id, timestamp),
-    env.DB.prepare(
-      "INSERT INTO tasks (id, parent_id, video_id, type, title, payload, priority, from_agent, to_agent, status, attempt, reassigned_from, created_at, updated_at, due_at) " +
-        "SELECT ?, ?, video_id, type, title || ' [FAILOVER]', payload, priority, 'system', 'animator_backup', 'queued', attempt + 1, id, ?, ?, due_at " +
-        "FROM tasks WHERE id = ? AND status = 'superseded' AND updated_at = ? AND changes() = 1",
-    ).bind(replacementId, task.parent_id ?? task.id, timestamp, timestamp, task.id, timestamp),
-    env.DB.prepare(
-      "INSERT INTO events (ts, actor, action, task_id, video_id, detail) " +
-        "SELECT ?, 'system', 'task_failover_queued', id, video_id, ? FROM tasks WHERE id = ? AND status = 'queued'",
-    ).bind(timestamp, JSON.stringify({
-      previous_task_id: task.id,
-      from_role: "animator",
-      to_role: "animator_backup",
-      reason,
-    }), replacementId),
-  ]);
-  if ((batch[0]?.meta?.changes ?? 0) === 1 && (batch[2]?.meta?.changes ?? 0) === 1) {
-    await notifyPM(env, "Failover render otomatis: " + task.id + " dialihkan ke " + replacementId +
-      " pada animator_backup. Alasan: " + reason + ".");
-  }
-}
-
-async function createDailyCEOReportTask(env: Env): Promise<void> {
-  const today = new Date().toISOString().slice(0, 10);
-  const exists = await env.DB.prepare("SELECT id FROM tasks WHERE type = 'daily_report' AND created_at LIKE ? LIMIT 1").bind(today + "%").first<{ id: string }>();
-  if (exists) return;
-  const timestamp = nowIso(); const id = newId("tsk_");
-  await env.DB.batch([
-    env.DB.prepare("INSERT INTO tasks (id, type, title, payload, priority, from_agent, to_agent, status, attempt, created_at, updated_at) VALUES (?, 'daily_report', ?, ?, 'normal', 'system', 'ceo', 'queued', 1, ?, ?)").bind(id, "Laporan harian hub " + today, JSON.stringify({ report_date: today, instruction: "Ringkas antrean tugas, approval pending, dan aktivitas video. Jangan mengubah state." }), timestamp, timestamp),
-    env.DB.prepare("INSERT INTO events (ts, actor, action, task_id, detail) VALUES (?, 'system', 'daily_report_queued', ?, ?)").bind(timestamp, id, JSON.stringify({ report_date: today })),
-  ]);
-}
 export default {
-  async scheduled(controller: { cron: string }, env: Env, ctx: WorkerExecutionContext) {
-    if (controller.cron === "*/15 * * * *") {
-      ctx.waitUntil(Promise.all([runStaleTaskSweep(env), runAgentDispatchSweep(env)]));
-    }
-    if (controller.cron === "0 2 * * *") ctx.waitUntil(createDailyCEOReportTask(env));
-  },
   async fetch(request: Request, env: Env, ctx: WorkerExecutionContext) {
     const url = new URL(request.url);
-    if (url.pathname === "/telegram/webhook" && request.method === "POST") return telegramWebhook(request, env, ctx);
+    if (url.pathname === "/telegram/webhook" && request.method === "POST") return telegramWebhook(request, env);
     if (url.pathname.startsWith("/pm/")) return pmRoute(request, env, url);
     const uploadMatch = url.pathname.match(/^\/artifacts\/upload\/([^/]+)$/);
     if (uploadMatch && request.method === "PUT") return artifactUploadRoute(request, env, decodeURIComponent(uploadMatch[1]));
@@ -1851,7 +1565,7 @@ export default {
       );
     }
 
-    const handler = createMcpHandler(() => createServer(agent, env, url.origin, ctx));
+    const handler = createMcpHandler(() => createServer(agent, env, url.origin));
     return handler(request, env, ctx as never);
   },
 };
