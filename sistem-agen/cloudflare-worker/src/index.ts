@@ -791,7 +791,7 @@ function createServer(agent: AuthenticatedAgent, env: Env, origin: string, ctx: 
         if (oldTask.type !== type || oldTask.video_id !== (video_id ?? null)) return toolError("Tugas pengganti harus memakai tipe tugas dan video_id yang sama.");
         if (type !== "render" || oldTask.to_agent !== "animator" || to !== "animator_backup") return toolError("Failover hanya diizinkan dari animator ke animator_backup untuk tugas render.");
       }
-      const targetAgent = await db.prepare("SELECT vendor FROM agents WHERE role = ? AND active = 1 LIMIT 1")
+      const targetAgent = await db.prepare("SELECT vendor FROM agents WHERE role = ? AND active = 1 ORDER BY CASE WHEN vendor = 'muse' THEN 0 ELSE 1 END, created_at LIMIT 1")
         .bind(to).first<{ vendor: string }>();
       const createdAt = nowIso();
       const taskId = newId("tsk_");
