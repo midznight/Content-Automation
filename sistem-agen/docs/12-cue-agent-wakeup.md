@@ -1,74 +1,25 @@
-# Cue Agent Wake-up — Manus API
+# Legacy Cue Agent Wake-up — Retired
 
-Dokumen ini menjelaskan adapter untuk membangunkan sesi persisten Cue (CEO dan Animator) ketika task Hub berstatus queued.
+**Status: RETIRED during the Muse App migration.**
 
-## Cara kerja
+The former Manus API wake-up adapter is no longer part of the active Worker runtime. The code and tests for `task.sendMessage` have been removed.
 
-1. Hub membuat task di D1 dan catatan outbox agent_dispatches dalam batch yang sama.
-2. Worker mengirim task.sendMessage ke task_id utama milik Cue agent melalui Manus API.
-3. Pesan meminta sesi Cue memakai konektor MCP Hub yang sudah ada, mengambil task ID yang tepat dari inbox, melakukan claim, memproses, lalu submit_result.
-4. Hasil tetap dikirim kembali oleh MCP Hub ke grup Telegram.
-5. Outbox menyimpan status, jumlah percobaan, dan error yang aman. Cron 15 menit mencoba ulang pengiriman sementara yang gagal.
+## Current replacement
 
-Adapter tidak mengirim instruksi ke akun Cue melalui Telegram dan tidak membuat task Manus baru. Ia mengirim pesan lanjutan ke main task milik agent yang sudah ada. Request task.sendMessage sengaja tidak menyertakan message.connectors, agar pilihan konektor pada sesi persisten tidak diganti.
+The active target architecture uses three Muse App identities connected to the existing remote MCP endpoint:
 
-## Konfigurasi
+- Muse Controller — Hub role `ceo`
+- Animator Primary — Hub role `animator`
+- Animator Backup — Hub role `animator_backup`
 
-Worker Secret:
-- MANUS_API_KEY — API key akun Manus yang memiliki akses ke Cue agent.
+Telegram creates tasks in Cloudflare D1. Muse App agents read and process their own inbox through the Content Automation Hub Custom Connector. Telegram does not wake Muse sessions directly.
 
-Worker variable:
-- MANUS_CEO_TASK_ID — nilai task_id dari agent Cue CEO pada agent.list.
-- MANUS_ANIMATOR_TASK_ID — opsional; nilai task_id utama untuk Cue Animator.
+See [13-muse-app-controller.md](./13-muse-app-controller.md) for connector setup, role permissions, Controller instructions, and the manual task-processing flow.
 
-Gunakan task_id milik agent, bukan agent.id. Dalam dokumentasi Manus, task_id adalah percakapan utama persisten agent dan memang menjadi target task.sendMessage.
+## Legacy data
 
-Cara mengambil daftar agent dari PowerShell (API key dimasukkan secara tersembunyi, tidak perlu dibagikan ke chat):
+The `agent_dispatches` table and historical rows are retained for audit and migration reference. They are not read by the active Muse task flow. Do not re-enable the former Manus Cron triggers.
 
-~~~powershell
-$secure = Read-Host "Manus API key" -AsSecureString
-$ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-try {
-    $manusKey = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr)
-    $response = Invoke-RestMethod -Method Get -Uri "https://api.manus.ai/v2/agent.list" -Headers @{ "x-manus-api-key" = $manusKey }
-    $response.data | Select-Object nickname, task_id, about | Format-Table -AutoSize
-}
-finally {
-    if ($ptr -ne [IntPtr]::Zero) {
-        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr)
-    }
-    Remove-Variable manusKey -ErrorAction SilentlyContinue
-    $secure.Dispose()
-}
-~~~
+## Previous implementation reference
 
-Simpan API key sebagai Worker Secret dan task ID sebagai Worker variable melalui Cloudflare Dashboard → Workers & Pages → content-automation-hub → Settings → Variables and Secrets. Deploy setelah menyimpan perubahan.
-
-## Perintah operasional
-
-- /ask ceo <pertanyaan> — buat task dan kirim wake-up ke Cue CEO.
-- /discuss <topik> — buat task diskusi untuk CEO dan kirim wake-up.
-- /wake <hub_task_id> — kirim ulang wake-up untuk task Cue yang masih queued, termasuk task yang dibuat sebelum adapter diaktifkan.
-- /status — tetap hanya membaca D1, tanpa memanggil AI.
-
-Role Muse belum dikirimi wake-up otomatis oleh adapter ini. Task mereka tetap masuk antrean Hub sampai integrasi pemicu Muse yang didukung resmi tersedia. Jangan menganggap task yang berstatus queued telah dikerjakan.
-
-## Arti status dispatch
-
-- pending / retry — menunggu pengiriman atau percobaan ulang.
-- sending — Worker sedang memanggil Manus API.
-- dispatched — Manus API menerima pesan wake-up; ini bukan bukti task Hub sudah selesai.
-- awaiting_config — API key atau task ID utama belum disetel.
-- failed — pengiriman gagal permanen atau batas retry tercapai.
-
-Keberhasilan proses baru terbukti saat task Hub berubah ke claimed lalu done / blocked / failed melalui MCP.
-
-## Biaya dan batasan
-
-Cloudflare D1/outbox dan Cron tidak menjalankan model AI. Namun pesan yang membangunkan Cue akan membuat Manus melanjutkan eksekusi agent dan dapat menggunakan kuota/kredit akun Manus sesuai paket dan penggunaan. Dispatch hanya dilakukan ketika task baru atau retry eksplisit diperlukan; tidak ada polling AI berkala untuk inbox kosong.
-
-## Referensi resmi
-
-- https://open.manus.ai/docs/v2/agents-overview
-- https://open.manus.ai/docs/v2/agent.list
-- https://open.manus.ai/docs/v2/task.sendMessage
+The old adapter used the Manus `task.sendMessage` API and a persistent Cue main-task ID. It has been removed because the target architecture no longer uses Cue/Manus.
