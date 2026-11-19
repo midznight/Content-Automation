@@ -19,7 +19,15 @@ Controller adalah satu-satunya pengarah pipeline. Ia dapat mengirim tugas produk
 - Setiap akun Muse wajib memakai API key Hub yang berbeda.
 - Simpan kredensial hanya melalui Secure Credentials Store Muse. Jangan meletakkan key pada prompt, dokumen, URL, atau pesan Telegram.
 
-Jika akun Muse sudah mempunyai Custom Connector Content Automation Hub yang berfungsi, gunakan konektor itu; jangan membuat duplikat. Setelah pemetaan role di database selesai, kredensial yang sama akan mengembalikan role terbaru melalui tool `whoami`.
+Jika akun Muse sudah mempunyai Custom Connector Content Automation Hub yang berfungsi, gunakan konektor itu; jangan membuat duplikat.
+
+**Pemetaan credential produksi per 19 November 2026 (setelah persetujuan pemilik):**
+- Akun Muse yang sebelumnya terdaftar sebagai `muse-analyst` kini menjadi identitas aktif `muse-controller` dengan role `ceo`. API key yang sudah tersimpan pada Secure Credentials Store akun tersebut tetap sama; Hub-lah yang memetakan hash key itu ke identitas Controller.
+- Credential Controller sebelumnya (yang berasal dari `muse-strategist`) dinonaktifkan dan dipertahankan sebagai `muse-controller-legacy`. Jangan gunakan credential legacy untuk koneksi Controller.
+- Tidak perlu membuat akun Muse, Custom Connector, atau API key baru untuk Controller. Gunakan Custom Connector yang sudah terpasang pada akun Muse yang sebelumnya dipakai sebagai Analyst.
+- Pemindahan ini dicatat pada D1 event `muse_controller_credential_reassigned` dan migration file `0006_reassign_muse_controller_credential.sql`.
+
+Setelah perubahan role di database, pemanggilan `whoami` dengan credential akun tersebut harus mengembalikan `name=muse-controller`, `role=ceo`, `vendor=muse`, dan `status=active`.
 
 ## Prompt untuk menambahkan Custom Connector pribadi
 
