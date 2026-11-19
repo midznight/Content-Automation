@@ -26,6 +26,3 @@ migrations_dir = "migrations"
 [[r2_buckets]]
 binding = "ARTIFACTS"
 bucket_name = "content-automation-artifacts-prod"
-
-[triggers]
-crons = ["*/15 * * * *", "0 2 * * *"]
