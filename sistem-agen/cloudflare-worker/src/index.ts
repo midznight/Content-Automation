@@ -1511,14 +1511,13 @@ async function handleTelegramMessage(env: Env, message: Record<string, unknown>,
   if (parsed.name === "help" || parsed.name === "start") {
     await send(
       "Content-Automation Chat Gateway\n" +
-      "/ask <role> <pertanyaan> — tanya satu agen\n" +
-      "/discuss <topik> — CEO memimpin diskusi maksimal tiga spesialis\n" +
-      "/status — ringkasan sistem tanpa membangunkan AI\n" +
+      "/ask <role> <pertanyaan> — kirim tugas ke Muse Controller atau Animator\n" +
+      "/discuss <topik> — Controller memimpin analisis\n" +
+      "/status — ringkasan sistem tanpa memanggil AI\n" +
       "/agents — daftar agen aktif\n" +
       "/approvals — daftar approval menunggu\n" +
       "/approve <approval_id> — setujui\n" +
       "/reject <approval_id> <catatan> — tolak\n" +
-      "/wake <hub_task_id> — bangunkan ulang task Cue yang masih queued\n" +
       "/help — bantuan"
     );
     return jsonResponse({ ok: true });
@@ -1565,32 +1564,7 @@ async function handleTelegramMessage(env: Env, message: Record<string, unknown>,
     return jsonResponse({ ok: result.ok });
   }
   if (parsed.name === "wake") {
-    const hubTaskId = parsed.args.trim();
-    if (!/^[a-zA-Z0-9_-]{8,64}$/.test(hubTaskId)) {
-      await send("Format: /wake <hub_task_id>");
-      return jsonResponse({ ok: true });
-    }
-    const task = await env.DB.prepare(
-      "SELECT t.id, t.to_agent, t.status, a.vendor FROM tasks t " +
-        "JOIN agents a ON a.role = t.to_agent AND a.active = 1 WHERE t.id = ? LIMIT 1",
-    ).bind(hubTaskId).first<{ id: string; to_agent: string; status: string; vendor: string }>();
-    if (!task || task.vendor !== "cue" || (task.to_agent !== "ceo" && task.to_agent !== "animator")) {
-      await send("Task tidak ditemukan atau role-nya tidak didukung adapter Cue.");
-      return jsonResponse({ ok: true });
-    }
-    if (task.status !== "queued") {
-      await send("Task " + hubTaskId + " tidak berstatus queued (status: " + task.status + "). Tidak dikirim ulang.");
-      return jsonResponse({ ok: true });
-    }
-    const timestamp = nowIso();
-    await env.DB.prepare(
-      "INSERT INTO agent_dispatches (id, task_id, role, provider, status, attempts, created_at, updated_at) " +
-        "VALUES (?, ?, ?, 'manus', 'pending', 0, ?, ?) " +
-        "ON CONFLICT(task_id) DO UPDATE SET status = 'pending', attempts = 0, last_attempt_at = NULL, " +
-        "next_attempt_at = NULL, dispatched_at = NULL, external_request_id = NULL, last_error = NULL, updated_at = excluded.updated_at",
-    ).bind(newId("dsp_"), hubTaskId, task.to_agent, timestamp, timestamp).run();
-    ctx.waitUntil(dispatchCueTask(env, hubTaskId));
-    await send("Wake-up diminta untuk Cue " + task.to_agent + ". Hub task: " + hubTaskId + ". Hasil akan dikirim setelah agen menyelesaikannya.");
+    await send("Perintah /wake Manus sudah dinonaktifkan selama migrasi ke Muse. Tugas baru diproses melalui Custom Connector Muse di inbox akun terkait.");
     return jsonResponse({ ok: true });
   }
   if (parsed.name === "ask") {
@@ -1606,11 +1580,9 @@ async function handleTelegramMessage(env: Env, message: Record<string, unknown>,
     }
     try {
       const created = await createTelegramChatTask(env, role as TelegramAgentRole, "chat_message", match[2].trim(), chatId, messageId, username);
-      if (created.vendor === "cue" && (role === "ceo" || role === "animator")) {
-        ctx.waitUntil(dispatchCueTask(env, created.taskId));
-        await send("Pertanyaan masuk ke antrean " + role + " dan wake-up Cue sedang dikirim.\nTask ID: " + created.taskId +
-          "\nBot akan memberi kabar ketika Manus menerima wake-up. Hasil baru muncul setelah task selesai melalui Hub.");
-      } else {
+      const roleLabel = role === "ceo" ? "Muse Controller" : role === "animator" ? "Animator Primary" : "Animator Backup";
+      await send("Tugas masuk ke antrean " + roleLabel + ".\\nTask ID: " + created.taskId +
+        "\\nMuse App tidak dibangunkan oleh Telegram. Buka akun Muse yang sesuai, lalu minta agen memeriksa inbox Content Automation Hub, mengklaim task ini, memprosesnya, dan mengirim submit_result."); else {
         await send("Pertanyaan masuk ke antrean " + role + ".\nTask ID: " + created.taskId +
           "\nAkun Muse belum memiliki adapter wake-up otomatis; agen perlu mengambil task melalui koneksi MCP aktif.");
       }
@@ -1626,8 +1598,8 @@ async function handleTelegramMessage(env: Env, message: Record<string, unknown>,
     }
     try {
       const created = await createTelegramChatTask(env, "ceo", "group_discussion", parsed.args, chatId, messageId, username);
-      ctx.waitUntil(dispatchCueTask(env, created.taskId));
-      await send("Diskusi masuk ke antrean CEO. Wake-up Cue sedang dikirim; CEO akan memilih maksimal tiga spesialis yang relevan.\nTask ID: " + created.taskId);
+      await send("Diskusi masuk ke antrean Muse Controller.\\nTask ID: " + created.taskId +
+        "\\nBuka akun Muse Controller dan minta agen memeriksa inbox Content Automation Hub, mengambil task ini, melakukan analisis, lalu mengirim submit_result.");
     } catch (error) {
       await send("Tidak dapat membuat diskusi: " + (error instanceof Error ? error.message : "kesalahan sistem"));
     }
