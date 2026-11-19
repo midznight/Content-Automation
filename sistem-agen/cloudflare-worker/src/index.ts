@@ -1581,11 +1581,8 @@ async function handleTelegramMessage(env: Env, message: Record<string, unknown>,
     try {
       const created = await createTelegramChatTask(env, role as TelegramAgentRole, "chat_message", match[2].trim(), chatId, messageId, username);
       const roleLabel = role === "ceo" ? "Muse Controller" : role === "animator" ? "Animator Primary" : "Animator Backup";
-      await send("Tugas masuk ke antrean " + roleLabel + ".\\nTask ID: " + created.taskId +
-        "\\nMuse App tidak dibangunkan oleh Telegram. Buka akun Muse yang sesuai, lalu minta agen memeriksa inbox Content Automation Hub, mengklaim task ini, memprosesnya, dan mengirim submit_result."); else {
-        await send("Pertanyaan masuk ke antrean " + role + ".\nTask ID: " + created.taskId +
-          "\nAkun Muse belum memiliki adapter wake-up otomatis; agen perlu mengambil task melalui koneksi MCP aktif.");
-      }
+      await send("Tugas masuk ke antrean " + roleLabel + ".\nTask ID: " + created.taskId +
+        "\nMuse App tidak dibangunkan oleh Telegram. Buka akun Muse yang sesuai, lalu minta agen memeriksa inbox Content Automation Hub, mengklaim task ini, memprosesnya, dan mengirim submit_result.");
     } catch (error) {
       await send("Tidak dapat membuat task: " + (error instanceof Error ? error.message : "kesalahan sistem"));
     }
@@ -1598,8 +1595,8 @@ async function handleTelegramMessage(env: Env, message: Record<string, unknown>,
     }
     try {
       const created = await createTelegramChatTask(env, "ceo", "group_discussion", parsed.args, chatId, messageId, username);
-      await send("Diskusi masuk ke antrean Muse Controller.\\nTask ID: " + created.taskId +
-        "\\nBuka akun Muse Controller dan minta agen memeriksa inbox Content Automation Hub, mengambil task ini, melakukan analisis, lalu mengirim submit_result.");
+      await send("Diskusi masuk ke antrean Muse Controller.\nTask ID: " + created.taskId +
+        "\nBuka akun Muse Controller dan minta agen memeriksa inbox Content Automation Hub, mengambil task ini, melakukan analisis, lalu mengirim submit_result.");
     } catch (error) {
       await send("Tidak dapat membuat diskusi: " + (error instanceof Error ? error.message : "kesalahan sistem"));
     }
