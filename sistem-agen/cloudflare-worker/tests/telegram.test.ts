@@ -14,11 +14,22 @@ test("ignores ordinary group messages and commands with leading whitespace", () 
 test("parses commands case-insensitively", () => {
   assert.deepEqual(parseTelegramCommand("/STATUS@contenthubbot"), { name: "status", args: "" });
 });
-test("formats attributed agent replies", () => {
+test("formats attributed legacy roles as inactive after migration", () => {
   const output = formatTelegramAgentReply("strategist", "done", { answer: "Tiga ide konten." }, "tsk_123");
-  assert.match(output, /Strategist — Muse/);
+  assert.match(output, /Legacy Strategist — inactive after Muse migration/);
   assert.match(output, /Tiga ide konten/);
   assert.match(output, /tsk_123/);
+});
+test("formats replies with the three active Muse identities", () => {
+  const cases = [
+    ["ceo", "Muse Controller"],
+    ["animator", "Animator Primary — Muse"],
+    ["animator_backup", "Animator Backup — Muse"],
+  ] as const;
+  for (const [role, label] of cases) {
+    const output = formatTelegramAgentReply(role, "done", { answer: "OK" }, "tsk_789");
+    assert.match(output, new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
 });
 test("blocked results retain the reason", () => {
   const output = formatTelegramAgentReply("animator", "blocked", { notes: "Kuota render habis." }, "tsk_456", "limit");
