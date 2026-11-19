@@ -11,27 +11,41 @@ export const ROLES = [
 
 export type Role = (typeof ROLES)[number];
 
-export const WORKER_ROLES = new Set<Role>([
-  "strategist",
-  "fact_checker",
+/**
+ * The active Muse architecture uses three identities:
+ * - ceo: Muse Controller (research, planning, writing, fact-check, QA, analytics)
+ * - animator: Animator Primary
+ * - animator_backup: Animator Backup
+ *
+ * Legacy specialist roles remain in the type during migration so existing
+ * records and historical tasks can be read safely. They are not part of the
+ * new routing matrix.
+ */
+export const CONTENT_AGENT_ROLES = new Set<Role>([
+  "ceo",
   "animator",
   "animator_backup",
-  "analyst",
-  "social",
 ]);
 
 const ALL_ROLES = new Set<Role>(ROLES);
 
 export const TASK_ROUTING_MATRIX: Record<string, { senders: ReadonlySet<string>; receivers: ReadonlySet<string> }> = {
-  topic_candidates: { senders: new Set(["ceo"]), receivers: new Set(["strategist"]) },
-  script: { senders: new Set(["ceo"]), receivers: new Set(["strategist"]) },
-  fact_check: { senders: new Set(["ceo"]), receivers: new Set(["fact_checker"]) },
-  render: { senders: new Set(["ceo"]), receivers: new Set(["animator", "animator_backup"]) },
-  package: { senders: new Set(["ceo"]), receivers: new Set(["social"]) },
-  metrics_report: { senders: new Set(["ceo", "system"]), receivers: new Set(["analyst"]) },
+  // The single Controller performs research, scripting, fact-checking,
+  // packaging and analytics itself. Controller subtasks remain visible in D1.
+  topic_candidates: { senders: new Set(["ceo"]), receivers: new Set(["ceo"]) },
+  script: { senders: new Set(["ceo"]), receivers: new Set(["ceo"]) },
+  fact_check: { senders: new Set(["ceo"]), receivers: new Set(["ceo"]) },
+  package: { senders: new Set(["ceo"]), receivers: new Set(["ceo"]) },
+  metrics_report: { senders: new Set(["ceo", "system"]), receivers: new Set(["ceo"]) },
   daily_report: { senders: new Set(["system"]), receivers: new Set(["ceo"]) },
-  echo: { senders: new Set(["ceo"]), receivers: WORKER_ROLES },
-  chat_message: { senders: new Set(["ceo"]), receivers: WORKER_ROLES },
+
+  // Video production is the only specialist lane.
+  render: { senders: new Set(["ceo"]), receivers: new Set(["animator", "animator_backup"]) },
+
+  // Controller may delegate a bounded chat/echo task to one of the three
+  // active identities. Legacy specialist roles are intentionally excluded.
+  echo: { senders: new Set(["ceo"]), receivers: CONTENT_AGENT_ROLES },
+  chat_message: { senders: new Set(["ceo"]), receivers: CONTENT_AGENT_ROLES },
   group_discussion: { senders: new Set(["pm"]), receivers: new Set(["ceo"]) },
 };
 
