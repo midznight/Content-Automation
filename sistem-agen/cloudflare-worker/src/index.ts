@@ -1407,7 +1407,7 @@ async function pmRoute(request: Request, env: Env, url: URL): Promise<Response> 
   if (request.method === "GET" && artifactMatch) return artifactDownloadRoute(request, env, decodeURIComponent(artifactMatch[1]), true);
   return jsonResponse({ error: "PM route tidak ditemukan." }, 404);
 }
-const TELEGRAM_AGENT_ROLES = ["ceo", "strategist", "fact_checker", "animator", "animator_backup", "analyst", "social"] as const;
+const TELEGRAM_AGENT_ROLES = ["ceo", "animator", "animator_backup"] as const;
 type TelegramAgentRole = (typeof TELEGRAM_AGENT_ROLES)[number];
 
 async function telegramThreadId(chatId: string): Promise<string> {
@@ -1418,7 +1418,7 @@ async function createTelegramChatTask(
   env: Env, role: TelegramAgentRole, type: "chat_message" | "group_discussion",
   prompt: string, chatId: string, messageId: string, username: string,
 ): Promise<{ taskId: string; vendor: string }> {
-  const active = await env.DB.prepare("SELECT id, vendor FROM agents WHERE role = ? AND active = 1 LIMIT 1")
+  const active = await env.DB.prepare("SELECT id, vendor FROM agents WHERE role = ? AND active = 1 ORDER BY CASE WHEN vendor = 'muse' THEN 0 ELSE 1 END, created_at LIMIT 1")
     .bind(role).first<{ id: string; vendor: string }>();
   if (!active) throw new Error("Akun agen untuk role '" + role + "' belum aktif di Hub.");
   const threadId = await telegramThreadId(chatId);
