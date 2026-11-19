@@ -1440,7 +1440,7 @@ async function createTelegramChatTask(
     telegram_message_id: messageId, requested_by: username || "PM", prompt,
     conversation_history: history,
     instructions: type === "group_discussion"
-      ? "Pimpin diskusi multi-agen. Pilih maksimal tiga spesialis yang relevan, kumpulkan hasil mereka melalui Hub, baca hasil penuh dengan get_task_result, lalu submit_result pada task diskusi asli dengan result.answer dan result.consulted. Jangan membuat diskusi rekursif."
+      ? "Bertindak sebagai Muse Controller tunggal. Kerjakan riset, strategi, fact-check, dan QA secara langsung. Gunakan send_task hanya bila Animator Primary atau Backup memang diperlukan untuk produksi visual. Baca hasil tugas anak melalui get_task_result, lalu submit_result pada task diskusi asli dengan result.answer dan result.consulted. Jangan membuat diskusi rekursif."
       : "Jawab pertanyaan PM secara langsung dan ringkas. Kirim hasil melalui submit_result dengan result.answer. Jangan mengubah state pipeline atau melakukan publikasi.",
   };
   const statements: D1PreparedStatement[] = [
@@ -1453,14 +1453,6 @@ async function createTelegramChatTask(
       "VALUES (?, ?, ?, ?, 'normal', 'pm-telegram', ?, 'queued', 1, ?, ?)",
     ).bind(taskId, type, "Telegram " + (type === "group_discussion" ? "discussion" : "chat") + ": " + prompt.slice(0, 160), JSON.stringify(payload), role, createdAt, createdAt),
   ];
-  if (active.vendor === "cue" && (role === "ceo" || role === "animator")) {
-    statements.push(
-      env.DB.prepare(
-        "INSERT INTO agent_dispatches (id, task_id, role, provider, status, attempts, created_at, updated_at) " +
-          "VALUES (?, ?, ?, 'manus', 'pending', 0, ?, ?)",
-      ).bind(newId("dsp_"), taskId, role, createdAt, createdAt),
-    );
-  }
   statements.push(
     env.DB.prepare(
       "INSERT INTO events (ts, actor, action, task_id, detail) VALUES (?, 'pm-telegram', 'telegram_chat_task_created', ?, ?)",
