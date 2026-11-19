@@ -43,10 +43,6 @@ interface R2Bucket {
   get(key: string): Promise<R2Object | null>;
   delete(key: string): Promise<void>;
 }
-interface WorkerExecutionContext {
-  waitUntil(promise: Promise<unknown>): void;
-}
-
 interface Env {
   DB: D1Database;
   ARTIFACTS: R2Bucket;
@@ -318,7 +314,7 @@ function textResult(value: unknown) {
   };
 }
 
-function createServer(agent: AuthenticatedAgent, env: Env, origin: string, ctx: WorkerExecutionContext): McpServer {
+function createServer(agent: AuthenticatedAgent, env: Env, origin: string): McpServer {
   const db = env.DB;
   const server = new McpServer({
     name: "content-automation-hub",
@@ -683,8 +679,6 @@ function createServer(agent: AuthenticatedAgent, env: Env, origin: string, ctx: 
         if (oldTask.type !== type || oldTask.video_id !== (video_id ?? null)) return toolError("Tugas pengganti harus memakai tipe tugas dan video_id yang sama.");
         if (type !== "render" || oldTask.to_agent !== "animator" || to !== "animator_backup") return toolError("Failover hanya diizinkan dari animator ke animator_backup untuk tugas render.");
       }
-      const targetAgent = await db.prepare("SELECT vendor FROM agents WHERE role = ? AND active = 1 ORDER BY CASE WHEN vendor = 'muse' THEN 0 ELSE 1 END, created_at LIMIT 1")
-        .bind(to).first<{ vendor: string }>();
       const createdAt = nowIso();
       const taskId = newId("tsk_");
       const statements: D1PreparedStatement[] = [];
@@ -1298,15 +1292,15 @@ async function telegramThreadId(chatId: string): Promise<string> {
 async function createTelegramChatTask(
   env: Env, role: TelegramAgentRole, type: "chat_message" | "group_discussion",
   prompt: string, chatId: string, messageId: string, username: string,
-): Promise<{ taskId: string; vendor: string }> {
-  const active = await env.DB.prepare("SELECT id, vendor FROM agents WHERE role = ? AND active = 1 ORDER BY CASE WHEN vendor = 'muse' THEN 0 ELSE 1 END, created_at LIMIT 1")
-    .bind(role).first<{ id: string; vendor: string }>();
+): Promise<{ taskId: string }> {
+  const active = await env.DB.prepare("SELECT id FROM agents WHERE role = ? AND active = 1 AND vendor = 'muse' LIMIT 1")
+    .bind(role).first<{ id: string }>();
   if (!active) throw new Error("Akun agen untuk role '" + role + "' belum aktif di Hub.");
   const threadId = await telegramThreadId(chatId);
   const existingMessage = await env.DB.prepare(
     "SELECT task_id FROM chat_messages WHERE external_chat_id = ? AND external_message_id = ? AND direction = 'inbound' LIMIT 1",
   ).bind(chatId, messageId).first<{ task_id: string | null }>();
-  if (existingMessage?.task_id) return { taskId: existingMessage.task_id, vendor: active.vendor };
+  if (existingMessage?.task_id) return { taskId: existingMessage.task_id };
   const historyRows = await env.DB.prepare(
     "SELECT actor, role, direction, message_text, created_at FROM chat_messages WHERE thread_id = ? ORDER BY created_at DESC LIMIT 8",
   ).bind(threadId).all<Record<string, unknown>>();
@@ -1344,10 +1338,10 @@ async function createTelegramChatTask(
     ).bind(newId("msg_"), threadId, taskId, prompt, chatId, messageId, createdAt),
   );
   await env.DB.batch(statements);
-  return { taskId, vendor: active.vendor };
+  return { taskId };
 }
 
-async function handleTelegramMessage(env: Env, message: Record<string, unknown>, ctx: WorkerExecutionContext): Promise<Response> {
+async function handleTelegramMessage(env: Env, message: Record<string, unknown>): Promise<Response> {
   const from = message.from as Record<string, unknown> | undefined;
   const chat = message.chat as Record<string, unknown> | undefined;
   const chatId = String(chat?.id ?? "");
@@ -1487,7 +1481,7 @@ async function handleTelegramMessage(env: Env, message: Record<string, unknown>,
   return jsonResponse({ ok: true });
 }
 
-async function telegramWebhook(request: Request, env: Env, ctx: WorkerExecutionContext): Promise<Response> {
+async function telegramWebhook(request: Request, env: Env): Promise<Response> {
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_PM_USER_ID || !env.TELEGRAM_WEBHOOK_SECRET) {
     return jsonResponse({ error: "Telegram webhook memerlukan BOT_TOKEN, PM_USER_ID, dan WEBHOOK_SECRET." }, 503);
   }
@@ -1496,7 +1490,7 @@ async function telegramWebhook(request: Request, env: Env, ctx: WorkerExecutionC
   let update: Record<string, unknown>;
   try { update = await request.json() as Record<string, unknown>; } catch { return jsonResponse({ error: "Body Telegram tidak valid." }, 400); }
   const incomingMessage = update.message as Record<string, unknown> | undefined;
-  if (incomingMessage) return handleTelegramMessage(env, incomingMessage, ctx);
+  if (incomingMessage) return handleTelegramMessage(env, incomingMessage);
 
   const callback = update.callback_query as Record<string, unknown> | undefined;
   if (!callback) return jsonResponse({ ok: true });
@@ -1516,9 +1510,9 @@ async function telegramWebhook(request: Request, env: Env, ctx: WorkerExecutionC
   return jsonResponse({ ok: result.ok, error: result.error });
 }
 export default {
-  async fetch(request: Request, env: Env, ctx: WorkerExecutionContext) {
+  async fetch(request: Request, env: Env) {
     const url = new URL(request.url);
-    if (url.pathname === "/telegram/webhook" && request.method === "POST") return telegramWebhook(request, env, ctx);
+    if (url.pathname === "/telegram/webhook" && request.method === "POST") return telegramWebhook(request, env);
     if (url.pathname.startsWith("/pm/")) return pmRoute(request, env, url);
     const uploadMatch = url.pathname.match(/^\/artifacts\/upload\/([^/]+)$/);
     if (uploadMatch && request.method === "PUT") return artifactUploadRoute(request, env, decodeURIComponent(uploadMatch[1]));
@@ -1567,7 +1561,7 @@ export default {
       );
     }
 
-    const handler = createMcpHandler(() => createServer(agent, env, url.origin, ctx));
+    const handler = createMcpHandler(() => createServer(agent, env, url.origin));
     return handler(request, env, ctx as never);
   },
 };
