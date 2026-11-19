@@ -23,6 +23,10 @@ interface D1Database {
   batch<T = unknown>(statements: D1PreparedStatement[]): Promise<D1Result<T>[]>;
 }
 
+interface WorkerExecutionContext {
+  waitUntil(promise: Promise<unknown>): void;
+}
+
 interface R2Object {
   body: ReadableStream<Uint8Array>;
   httpMetadata?: { contentType?: string };
@@ -1510,7 +1514,7 @@ async function telegramWebhook(request: Request, env: Env): Promise<Response> {
   return jsonResponse({ ok: result.ok, error: result.error });
 }
 export default {
-  async fetch(request: Request, env: Env) {
+  async fetch(request: Request, env: Env, ctx: WorkerExecutionContext) {
     const url = new URL(request.url);
     if (url.pathname === "/telegram/webhook" && request.method === "POST") return telegramWebhook(request, env);
     if (url.pathname.startsWith("/pm/")) return pmRoute(request, env, url);
